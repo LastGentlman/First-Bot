@@ -1,0 +1,9 @@
+easyocr
+torchvision
+python-telegram-bot==20.6
+easyocr
+torch
+torchvision
+python-dotenv
+supabase-py
+aiohttp
