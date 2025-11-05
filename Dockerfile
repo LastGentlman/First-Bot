@@ -4,10 +4,10 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Dependencias del sistema necesarias para EasyOCR / OpenCV / compilación
+# Resuelto: reemplazar libgl1 por libgl1
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
-	libgl1-mesa-glx \
+	libgl1 \
 	libglib2.0-0 \
 	libsm6 \
 	libxrender1 \
@@ -18,5 +18,5 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-
+RUN pip install -r requirements.txt
 CMD ["python", "main.py"]
