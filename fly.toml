@@ -1,22 +1,24 @@
-# fly.toml app configuration file generated for first-bot on 2025-11-05T00:57:03Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
+# Minimal fly.toml for `first-bot`.
+# Kept intentionally simple to avoid unknown/unsupported keys that break deploys.
 
 app = "first-bot"
 primary_region = "dfw"
 
 [build]
+  dockerfile = "Dockerfile"
 
-[http_service]
+[env]
+  PORT = "8080"
+
+[[services]]
   internal_port = 8080
-  force_https = true
-  auto_stop_machines = false
-  auto_start_machines = true
-  min_machines_running = 1
+  protocol = "tcp"
   processes = ["app"]
 
-[[vm]]
-  memory = "1gb"
-  cpu_kind = "shared"
-  cpus = 1
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
