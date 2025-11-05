@@ -4,7 +4,7 @@ from config import BOT_TOKEN
 from procesar_tabla import procesar_tabla
 import os
 import threading
-from aiohttp import web
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Diccionario para recordar en qué modo está cada usuario
 user_modes = {}
@@ -40,17 +40,27 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_modes[user_id] = None  # Resetea el modo
 
 
+class _HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == "/health":
+            self.send_response(200)
+            self.send_header("Content-type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        # Evita escribir en stderr por cada petición de health check
+        return
+
+
 def _start_health_server():
     """Arranca un servidor HTTP simple para healthchecks en un hilo separado."""
-
-    async def _health(request):
-        return web.Response(text="ok")
-
-    app = web.Application()
-    app.router.add_get('/health', _health)
     port = int(os.getenv('PORT', '8080'))
-    # web.run_app bloquearía, así que lo ejecutamos en el propio hilo
-    web.run_app(app, host='0.0.0.0', port=port)
+    server = HTTPServer(('0.0.0.0', port), _HealthHandler)
+    server.serve_forever()
 
 
 def main():
@@ -65,14 +75,5 @@ def main():
     app.run_polling()
 
 
-if __name__ == "__main__":
-    main()
-
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("tabla", tabla))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-    app.run_polling()
 if __name__ == "__main__":
     main()
