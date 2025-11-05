@@ -4,7 +4,6 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Resuelto: reemplazar libgl1 por libgl1
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
 	libgl1 \
