@@ -1,7 +1,8 @@
-easyocr
-torchvision
+--extra-index-url https://download.pytorch.org/whl/cpu
+easyocr==1.7.2
+torch==2.3.1+cpu
+torchvision==0.18.1+cpu
 python-telegram-bot==20.6
-supabase
-torch
-python-dotenv
-aiohttp
+supabase==2.8.1
+python-dotenv==1.2.1
+aiohttp==3.13.2

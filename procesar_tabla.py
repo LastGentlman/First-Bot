@@ -1,12 +1,21 @@
 import easyocr
 import re
 from datetime import datetime
+from functools import lru_cache
 from supabase import create_client, Client
+from config import SUPABASE_URL, SUPABASE_KEY
 
-# Configuración de Supabase
-SUPABASE_URL = "https://TU_URL.supabase.co"
-SUPABASE_KEY = "TU_API_KEY"
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+reader = easyocr.Reader(["es"], gpu=False)
+
+
+@lru_cache(maxsize=1)
+def get_supabase_client() -> Client:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise RuntimeError(
+            "SUPABASE_URL y SUPABASE_KEY no están configuradas. "
+            "Define las variables de entorno antes de ejecutar la aplicación."
+        )
+    return create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # --- Funciones auxiliares ---
 
@@ -45,7 +54,6 @@ def completar_comillas(filas):
 
 def procesar_tabla(imagen):
     """Lee una tabla escrita a mano con EasyOCR, limpia, ordena y guarda en Supabase"""
-    reader = easyocr.Reader(["es"], gpu=False)
     result = reader.readtext(imagen, detail=0)
     
     # Detectar prefijo numérico base
@@ -98,6 +106,7 @@ def procesar_tabla(imagen):
     datos_ordenados = sorted(datos, key=lambda x: datetime.strptime(x["hora"], "%H:%M"))
 
     # Insertar en Supabase
+    supabase = get_supabase_client()
     for row in datos_ordenados:
         supabase.table("registros").insert({
             "id": row["id"],
