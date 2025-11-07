@@ -10,16 +10,15 @@ Bot de Telegram que recibe fotografías de tablas manuscritas, extrae los datos 
 Instala las dependencias ejecutando:
 
 ```bash
-pip install -r requirements.text
+pip install -r requirements.txt
 ```
 
-> Nota: El archivo de dependencias se llama `requirements.text`.
-
 ## Configuración
-1. Copia tus credenciales al archivo `config.py`:
+1. Define las credenciales mediante variables de entorno (p. ej. en `.env` o `fly secrets`):
    - `BOT_TOKEN`: token del bot de Telegram.
-   - `SUPABASE_URL` y `SUPABASE_KEY`: credenciales de Supabase. También puedes sobreescribirlas en `procesar_tabla.py` si trabajas con distintos entornos.
-2. Verifica que en Supabase exista la tabla `registros` con las columnas `id`, `folio`, `hora` y `estado`.
+   - `SUPABASE_URL` y `SUPABASE_KEY`: credenciales de Supabase.
+2. (Opcional) Carga las variables desde `.env` usando `python-dotenv` (el archivo `config.py` ya lo hace automáticamente).
+3. Verifica que en Supabase exista la tabla `registros` con las columnas `id`, `folio`, `hora` y `estado`.
 
 ## Uso
 ```bash
@@ -40,3 +39,8 @@ Acciones disponibles desde Telegram:
 - Ajustar la agrupación de celdas utilizando las coordenadas devueltas por EasyOCR.
 - Añadir validaciones y manejo de errores en las inserciones de Supabase.
 - Crear pruebas automatizadas para la función `procesar_tabla` con distintos ejemplos de tablas manuscritas.
+
+## Despliegue en Fly.io
+1. Autentícate con `fly auth login` y crea la app si aún no existe (`fly launch --no-deploy`).
+2. Define los secretos requeridos: `fly secrets set BOT_TOKEN=xxx SUPABASE_URL=xxx SUPABASE_KEY=xxx`.
+3. Despliega con `fly deploy --remote-only` y verifica el estado con `fly status -a first-bot`.
