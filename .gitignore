@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+temp_*.jpg
+temp_*.png
+temp_*.jpeg
+*.tmp
+*.log
+
+# Build files
+build/
+dist/
+*.egg-info/
+
+# Docker
+docker-build.log
+

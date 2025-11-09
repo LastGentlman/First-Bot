@@ -11,7 +11,7 @@ user_modes = {}
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("¡Hola! Envíame /tabla para procesar una imagen de tabla.")
+    await update.message.reply_text("¡Hola! en que te puedo ayudar?\n \nCCTV Monitoring:\n - /tabla para procesar una fofo en tabla de la revicion de devoluciones.")
 
 
 async def tabla(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -25,12 +25,12 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = user_modes.get(user_id)
 
     if not mode:
-        await update.message.reply_text("Usa /tabla antes de enviar una imagen 📋")
+        await update.message.reply_text("Usa un comando para activar el modo de procesamiento antes de enviar una imagen 📋")
         return
 
     file = await update.message.photo[-1].get_file()
     filepath = f"temp_{user_id}.jpg"
-    await file.download_to_drive(filepath)
+    await file.download_to_drive(custom_path=filepath)
 
     if mode == "tabla":
         await update.message.reply_text("Procesando tabla... 🧾")
