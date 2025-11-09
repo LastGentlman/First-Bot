@@ -71,6 +71,7 @@ def procesar_tabla(imagen):
             return "Error: No se detectó texto en la imagen. Asegúrate de que la imagen sea clara y contenga texto."
         
         logger.info(f"OCR detectó {len(result)} elementos de texto")
+        logger.info(f"Elementos detectados por OCR: {result}")  # Mostrar todos los elementos para debugging
         
         # Detectar prefijo numérico base (busca números de 5+ dígitos o usa el patrón común)
         prefijo_detectado = None
@@ -101,78 +102,132 @@ def procesar_tabla(imagen):
         # Filtrar líneas relevantes (folios, horas, símbolos)
         # El algoritmo busca patrones: Letra -> Folio -> Hora -> Estado
         datos = []
-        letra = None
         
-        for i, texto in enumerate(result):
-            texto = texto.strip()
+        # Inicializar listas de componentes
+        letras_encontradas = []
+        folios_encontrados = []
+        horas_encontradas = []
+        estados_encontrados = []
+        
+        try:
+            # Primero, buscar todas las letras, folios, horas y estados en los resultados
             
-            # Detecta letra inicial (ej. A)
-            if re.match(r"^[A-Z]$", texto):
-                letra = texto
-                logger.debug(f"Letra detectada: {letra}")
-                continue
+            logger.info("Iniciando búsqueda de componentes en resultados OCR...")
             
-            # Detecta folio (número de 3-4 dígitos)
-            if re.match(r"^\d{3,4}$", texto):
-                numero = texto
+            for i, texto in enumerate(result):
+                texto = texto.strip()
+                logger.debug(f"Procesando elemento {i}: '{texto}'")
                 
-                # Busca siguiente elemento (hora)
-                hora = None
-                estado = None
+                # Detecta letra inicial (ej. A)
+                if re.match(r"^[A-Z]$", texto):
+                    letras_encontradas.append((i, texto))
+                    logger.info(f"Letra detectada en posición {i}: {texto}")
                 
-                if i + 1 < len(result):
-                    posible_hora = result[i + 1].strip()
-                    # Usar la función limpiar_hora existente para normalizar
-                    hora_normalizada = limpiar_hora(posible_hora)
-                    
-                    # Verificar si realmente es una hora válida
+                # Detecta folio (número de 3-4 dígitos)
+                if re.match(r"^\d{3,4}$", texto):
+                    folios_encontrados.append((i, texto))
+                    logger.info(f"Folio detectado en posición {i}: {texto}")
+                
+                # Detecta hora (patrón HH:MM o H:MM)
+                try:
+                    hora_normalizada = limpiar_hora(texto)
                     if re.match(r"^\d{1,2}:\d{2}$", hora_normalizada):
-                        # Parsear la hora para convertir horas tempranas
-                        match_hora = re.match(r"(\d{1,2}):(\d{2})", hora_normalizada)
-                        if match_hora:
-                            h = int(match_hora.group(1))
-                            m = match_hora.group(2)
-                            
-                            # Si la hora es temprana (1:00-4:59), probablemente es AM del siguiente día
-                            if h < 5:
-                                hora = f"{h+24}:{m}"
-                            else:
-                                hora = f"{h:02d}:{m}"
-                            
-                            # Busca símbolo (✅ o ❌) en el siguiente elemento
-                            if i + 2 < len(result):
-                                simbolo = result[i + 2].strip()
-                                estado = limpiar_estado(simbolo)
-                            else:
-                                # Si no hay símbolo, buscar en elementos más adelante
-                                for j in range(i + 2, min(i + 5, len(result))):
-                                    simbolo = result[j].strip()
-                                    estado_temp = limpiar_estado(simbolo)
-                                    if estado_temp != "indefinido":
-                                        estado = estado_temp
-                                        break
-                                if not estado:
-                                    estado = "indefinido"
+                        horas_encontradas.append((i, hora_normalizada, texto))
+                        logger.info(f"Hora detectada en posición {i}: {texto} -> {hora_normalizada}")
+                except Exception as e:
+                    logger.debug(f"Error procesando hora en posición {i}: {e}")
                 
-                # Si encontramos todos los componentes, agregar el registro
-                if letra and numero and hora and estado:
-                    folio_completo = f"{prefijo_detectado}{numero}"
+                # Detecta estado (símbolos)
+                try:
+                    estado_temp = limpiar_estado(texto)
+                    if estado_temp != "indefinido":
+                        estados_encontrados.append((i, estado_temp, texto))
+                        logger.info(f"Estado detectado en posición {i}: {texto} -> {estado_temp}")
+                except Exception as e:
+                    logger.debug(f"Error procesando estado en posición {i}: {e}")
+            
+            logger.info(f"Resumen: {len(letras_encontradas)} letras, {len(folios_encontrados)} folios, {len(horas_encontradas)} horas, {len(estados_encontrados)} estados")
+        except Exception as e:
+            logger.error(f"Error al buscar componentes: {e}", exc_info=True)
+            return f"Error: Error al procesar los resultados de OCR. {str(e)}"
+        
+        # Ahora intentar emparejar los componentes
+        # Estrategia: buscar folios y luego buscar letra, hora y estado cercanos
+        logger.info(f"Iniciando emparejamiento de componentes para {len(folios_encontrados)} folios...")
+        
+        for folio_idx, folio_num in folios_encontrados:
+            logger.debug(f"Procesando folio {folio_num} en posición {folio_idx}")
+            # Buscar letra más cercana antes del folio
+            letra_cercana = None
+            for letra_idx, letra_text in letras_encontradas:
+                if letra_idx < folio_idx and (folio_idx - letra_idx) <= 5:
+                    letra_cercana = letra_text
+                    break
+            
+            # Buscar hora más cercana después del folio
+            hora_cercana = None
+            hora_raw = None
+            for hora_idx, hora_norm, hora_orig in horas_encontradas:
+                if hora_idx > folio_idx and (hora_idx - folio_idx) <= 5:
+                    hora_cercana = hora_norm
+                    hora_raw = hora_orig
+                    break
+            
+            # Buscar estado más cercano después de la hora (o después del folio si no hay hora)
+            estado_cercano = None
+            buscar_desde = folio_idx
+            if hora_cercana:
+                # Buscar estado después de la hora
+                for hora_idx, _, _ in horas_encontradas:
+                    if hora_idx > folio_idx:
+                        buscar_desde = hora_idx
+                        break
+            
+            for estado_idx, estado_text, _ in estados_encontrados:
+                if estado_idx > buscar_desde and (estado_idx - buscar_desde) <= 5:
+                    estado_cercano = estado_text
+                    break
+            
+            # Si no encontramos estado, usar "indefinido"
+            if not estado_cercano:
+                estado_cercano = "indefinido"
+            
+            # Si tenemos letra, folio y hora, crear el registro
+            if letra_cercana and folio_num and hora_cercana:
+                # Procesar la hora (convertir horas tempranas)
+                match_hora = re.match(r"(\d{1,2}):(\d{2})", hora_cercana)
+                if match_hora:
+                    h = int(match_hora.group(1))
+                    m = match_hora.group(2)
+                    
+                    # Si la hora es temprana (1:00-4:59), probablemente es AM del siguiente día
+                    if h < 5:
+                        hora_final = f"{h+24}:{m}"
+                    else:
+                        hora_final = f"{h:02d}:{m}"
+                    
+                    folio_completo = f"{prefijo_detectado}{folio_num}"
                     datos.append({
-                        "id": letra,
-                        "folio": numero,
+                        "id": letra_cercana,
+                        "folio": folio_num,
                         "folio_completo": folio_completo,
-                        "hora": hora,
-                        "estado": estado
+                        "hora": hora_final,
+                        "estado": estado_cercano
                     })
-                    logger.debug(f"Registro detectado: Letra={letra}, Folio={folio_completo}, Hora={hora}, Estado={estado}")
-                    # Resetear letra para el siguiente registro
-                    letra = None
-                elif letra and numero:
-                    # Si tenemos letra y folio pero falta hora o estado, loguear para debugging
-                    logger.debug(f"Registro incompleto: Letra={letra}, Folio={numero}, Hora={hora}, Estado={estado}")
+                    logger.info(f"Registro creado: Letra={letra_cercana}, Folio={folio_completo}, Hora={hora_final}, Estado={estado_cercano}")
+            else:
+                logger.debug(f"No se pudo crear registro para folio {folio_num}: letra={letra_cercana}, hora={hora_cercana}")
 
         if not datos:
-            return "Error: No se pudieron extraer datos válidos de la tabla. Verifica que la imagen contenga una tabla con columnas claras."
+            # Proporcionar información más detallada sobre qué se detectó
+            info_detectado = f"Se detectaron: {len(letras_encontradas)} letras, {len(folios_encontrados)} folios, {len(horas_encontradas)} horas, {len(estados_encontrados)} estados. "
+            info_detectado += f"Elementos OCR: {result[:15] if len(result) > 0 else 'ninguno'}"
+            logger.warning(f"No se pudieron extraer datos válidos. {info_detectado}")
+            logger.warning(f"Letras encontradas: {letras_encontradas}")
+            logger.warning(f"Folios encontrados: {folios_encontrados}")
+            logger.warning(f"Horas encontradas: {horas_encontradas}")
+            logger.warning(f"Estados encontrados: {estados_encontrados}")
+            return f"Error: No se pudieron extraer datos válidos de la tabla. {info_detectado} Verifica que la imagen contenga una tabla con columnas claras (Letra, Folio, Hora, Estado)."
         
         logger.info(f"Se detectaron {len(datos)} registros completos")
 
