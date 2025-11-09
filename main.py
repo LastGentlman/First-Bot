@@ -28,7 +28,9 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usa un comando para activar el modo de procesamiento antes de enviar una imagen 📋")
         return
 
-    file = await update.message.photo[-1].get_file()
+    # Obtener el file_id de la foto más grande
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
     filepath = f"temp_{user_id}.jpg"
     await file.download_to_drive(custom_path=filepath)
 
