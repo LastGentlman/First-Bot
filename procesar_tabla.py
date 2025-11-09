@@ -136,30 +136,90 @@ def procesar_tabla(imagen):
         try:
             supabase = get_supabase_client()
             registros_insertados = 0
+            errores = []
+            
             for row in datos_ordenados:
                 try:
-                    supabase.table("registros").insert({
-                        "id": row["id"],
-                        "folio": row["folio_completo"],
-                        "hora": row["hora"],
-                        "estado": row["estado"]
-                    }).execute()
+                    # Validar que no haya valores None o vacíos antes de insertar
+                    if not row.get("id") or row["id"] is None:
+                        errores.append(f"ID vacío o None en registro: {row}")
+                        continue
+                    
+                    if not row.get("folio_completo") or row["folio_completo"] is None:
+                        errores.append(f"Folio vacío o None en registro: {row}")
+                        continue
+                    
+                    if not row.get("hora") or row["hora"] is None:
+                        errores.append(f"Hora vacía o None en registro: {row}")
+                        continue
+                    
+                    if not row.get("estado") or row["estado"] is None:
+                        errores.append(f"Estado vacío o None en registro: {row}")
+                        continue
+                    
+                    # Preparar datos para inserción
+                    datos_insert = {
+                        "id": str(row["id"]).strip(),
+                        "folio": str(row["folio_completo"]).strip(),
+                        "hora": str(row["hora"]).strip(),
+                        "estado": str(row["estado"]).strip()
+                    }
+                    
+                    # Validar que los datos no estén vacíos después de strip
+                    if not all(datos_insert.values()):
+                        errores.append(f"Datos vacíos después de limpieza: {datos_insert}")
+                        continue
+                    
+                    response = supabase.table("registros").insert(datos_insert).execute()
                     registros_insertados += 1
+                    logger.debug(f"Registro insertado exitosamente: {datos_insert}")
+                    
                 except Exception as e:
-                    logger.error(f"Error insertando registro {row}: {e}")
-                    # Continuar con los demás registros
+                    error_msg = str(e)
+                    logger.error(f"Error insertando registro {row}: {error_msg}")
+                    
+                    # Mensajes de error más específicos según el tipo de error
+                    if "duplicate key" in error_msg.lower() or "unique constraint" in error_msg.lower():
+                        errores.append(f"ID duplicado: {row.get('id')} (ya existe en la base de datos)")
+                    elif "null value" in error_msg.lower() or "not null" in error_msg.lower():
+                        errores.append(f"Valor requerido faltante en registro: {row}")
+                    elif "foreign key" in error_msg.lower():
+                        errores.append(f"Referencia inválida en registro: {row}")
+                    elif "check constraint" in error_msg.lower():
+                        errores.append(f"Valor no válido según restricciones: {row}")
+                    else:
+                        errores.append(f"Error de base de datos: {error_msg}")
                     continue
             
             logger.info(f"Procesamiento completado: {registros_insertados} registros insertados de {len(datos_ordenados)}")
             
-            if registros_insertados == 0:
-                return f"Error: No se pudieron insertar registros en la base de datos. Se procesaron {len(datos_ordenados)} registros."
+            # Construir mensaje de resultado
+            mensaje_resultado = f"Procesados {len(datos_ordenados)} registros, {registros_insertados} insertados exitosamente."
             
-            return f"Procesados {len(datos_ordenados)} registros, {registros_insertados} insertados exitosamente."
+            if errores:
+                mensaje_resultado += f"\n⚠️ {len(errores)} error(es): " + "; ".join(errores[:3])  # Mostrar solo los primeros 3 errores
+                if len(errores) > 3:
+                    mensaje_resultado += f" ... y {len(errores) - 3} más"
+            
+            if registros_insertados == 0:
+                return f"Error: No se pudieron insertar registros en la base de datos. Se procesaron {len(datos_ordenados)} registros. " + \
+                       (f"Errores: {'; '.join(errores[:2])}" if errores else "Verifica el schema de la tabla 'registros' en Supabase.")
+            
+            return mensaje_resultado
             
         except Exception as e:
-            logger.error(f"Error conectando a Supabase: {e}")
-            return f"Error: No se pudo conectar a la base de datos. {str(e)}"
+            error_msg = str(e)
+            logger.error(f"Error conectando a Supabase: {error_msg}", exc_info=True)
+            
+            # Mensajes de error más específicos
+            if "connection" in error_msg.lower() or "timeout" in error_msg.lower():
+                return f"Error: No se pudo conectar a la base de datos. Verifica tu conexión a internet y las credenciales de Supabase."
+            elif "authentication" in error_msg.lower() or "unauthorized" in error_msg.lower():
+                return f"Error: Credenciales de Supabase inválidas. Verifica SUPABASE_URL y SUPABASE_KEY."
+            elif "not found" in error_msg.lower() or "404" in error_msg.lower():
+                return f"Error: La tabla 'registros' no existe en Supabase. Verifica que la tabla esté creada con las columnas: id, folio, hora, estado."
+            else:
+                return f"Error: No se pudo conectar a la base de datos. {error_msg}"
         
     except MemoryError:
         logger.error("Error de memoria al procesar tabla")
