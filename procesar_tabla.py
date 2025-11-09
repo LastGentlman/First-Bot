@@ -72,58 +72,109 @@ def procesar_tabla(imagen):
         
         logger.info(f"OCR detectó {len(result)} elementos de texto")
         
-        # Detectar prefijo numérico base
-        prefijo = ""
+        # Detectar prefijo numérico base (busca números de 5+ dígitos o usa el patrón común)
+        prefijo_detectado = None
         for text in result:
-            if re.match(r"\d{3,}", text):
-                prefijo = text[:3]
+            text_clean = text.strip()
+            # Busca números largos que probablemente contengan el prefijo
+            if re.match(r"^\d{5,}$", text_clean):
+                prefijo_detectado = text_clean[:3]
+                logger.info(f"Prefijo detectado automáticamente: {prefijo_detectado}")
                 break
-
-        # Simular agrupación (en práctica usarías coordenadas, aquí simplificado)
-        # Estructura de columnas detectadas: ID | FOLIO | HORA | ESTADO
-        filas = []
-        linea = []
-        for texto in result:
-            if re.match(r"[a-zA-Z]", texto):
-                if linea:
-                    filas.append(linea)
-                    linea = []
-                linea = [texto]
-            else:
-                linea.append(texto)
-        if linea:
-            filas.append(linea)
-
-        # Limpieza de filas incompletas o con ruido
+        
+        # Si no se detectó, buscar en números de 3-4 dígitos (podría ser el prefijo completo)
+        if not prefijo_detectado:
+            for text in result:
+                text_clean = text.strip()
+                if re.match(r"^\d{3,4}$", text_clean):
+                    # Si es de 3 dígitos, podría ser el prefijo
+                    if len(text_clean) == 3:
+                        prefijo_detectado = text_clean
+                        logger.info(f"Prefijo detectado desde número de 3 dígitos: {prefijo_detectado}")
+                        break
+        
+        # Si aún no se detectó, usar prefijo por defecto
+        if not prefijo_detectado:
+            prefijo_detectado = "168"
+            logger.info(f"Usando prefijo por defecto: {prefijo_detectado}")
+        
+        # Filtrar líneas relevantes (folios, horas, símbolos)
+        # El algoritmo busca patrones: Letra -> Folio -> Hora -> Estado
         datos = []
-        for f in filas:
-            if len(f) >= 4:
-                try:
-                    id_ = f[0].strip()[0]
-                    folio = re.sub(r"[^\d]", "", f[1])
-                    hora = limpiar_hora(f[2])
-                    estado = limpiar_estado(f[3])
+        letra = None
+        
+        for i, texto in enumerate(result):
+            texto = texto.strip()
+            
+            # Detecta letra inicial (ej. A)
+            if re.match(r"^[A-Z]$", texto):
+                letra = texto
+                logger.debug(f"Letra detectada: {letra}")
+                continue
+            
+            # Detecta folio (número de 3-4 dígitos)
+            if re.match(r"^\d{3,4}$", texto):
+                numero = texto
+                
+                # Busca siguiente elemento (hora)
+                hora = None
+                estado = None
+                
+                if i + 1 < len(result):
+                    posible_hora = result[i + 1].strip()
+                    # Usar la función limpiar_hora existente para normalizar
+                    hora_normalizada = limpiar_hora(posible_hora)
+                    
+                    # Verificar si realmente es una hora válida
+                    if re.match(r"^\d{1,2}:\d{2}$", hora_normalizada):
+                        # Parsear la hora para convertir horas tempranas
+                        match_hora = re.match(r"(\d{1,2}):(\d{2})", hora_normalizada)
+                        if match_hora:
+                            h = int(match_hora.group(1))
+                            m = match_hora.group(2)
+                            
+                            # Si la hora es temprana (1:00-4:59), probablemente es AM del siguiente día
+                            if h < 5:
+                                hora = f"{h+24}:{m}"
+                            else:
+                                hora = f"{h:02d}:{m}"
+                            
+                            # Busca símbolo (✅ o ❌) en el siguiente elemento
+                            if i + 2 < len(result):
+                                simbolo = result[i + 2].strip()
+                                estado = limpiar_estado(simbolo)
+                            else:
+                                # Si no hay símbolo, buscar en elementos más adelante
+                                for j in range(i + 2, min(i + 5, len(result))):
+                                    simbolo = result[j].strip()
+                                    estado_temp = limpiar_estado(simbolo)
+                                    if estado_temp != "indefinido":
+                                        estado = estado_temp
+                                        break
+                                if not estado:
+                                    estado = "indefinido"
+                
+                # Si encontramos todos los componentes, agregar el registro
+                if letra and numero and hora and estado:
+                    folio_completo = f"{prefijo_detectado}{numero}"
                     datos.append({
-                        "id": id_,
-                        "folio": folio,
+                        "id": letra,
+                        "folio": numero,
+                        "folio_completo": folio_completo,
                         "hora": hora,
                         "estado": estado
                     })
-                except (IndexError, ValueError) as e:
-                    logger.warning(f"Error procesando fila {f}: {e}")
-                    continue
+                    logger.debug(f"Registro detectado: Letra={letra}, Folio={folio_completo}, Hora={hora}, Estado={estado}")
+                    # Resetear letra para el siguiente registro
+                    letra = None
+                elif letra and numero:
+                    # Si tenemos letra y folio pero falta hora o estado, loguear para debugging
+                    logger.debug(f"Registro incompleto: Letra={letra}, Folio={numero}, Hora={hora}, Estado={estado}")
 
         if not datos:
             return "Error: No se pudieron extraer datos válidos de la tabla. Verifica que la imagen contenga una tabla con columnas claras."
-
-        datos = completar_comillas(datos)
-
-        # Agregar columna de folio completo
-        for d in datos:
-            if prefijo and not d["folio"].startswith(prefijo):
-                d["folio_completo"] = f"{d['id']}{prefijo}{d['folio']}"
-            else:
-                d["folio_completo"] = f"{d['id']}{d['folio']}"
+        
+        logger.info(f"Se detectaron {len(datos)} registros completos")
 
         # Ordenar por hora
         try:
