@@ -3,6 +3,7 @@ import re
 import logging
 from datetime import datetime
 from functools import lru_cache
+from typing import Optional
 from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 
@@ -22,14 +23,62 @@ def get_supabase_client() -> Client:
 
 # --- Funciones auxiliares ---
 
-def limpiar_hora(hora_raw: str) -> str:
-    """Normaliza texto OCR de hora (corrige l, I, -, etc.)"""
-    hora = hora_raw.strip().replace("l", "1").replace("I", "1").replace("-", ":")
-    match = re.match(r"(\d{1,2}):(\d{2})", hora)
-    if match:
-        h, m = int(match[1]), match[2]
-        return f"{h:02}:{m}"
-    return "00:00"
+def limpiar_hora(hora_raw: str) -> Optional[str]:
+    """Normaliza texto OCR de hora (corrige caracteres comunes y valida formato HH:MM)."""
+    if not hora_raw:
+        return None
+
+    hora = hora_raw.strip()
+    if not hora:
+        return None
+
+    reemplazos = {
+        "l": "1",
+        "I": "1",
+        "|": "1",
+        "O": "0",
+        "o": "0",
+        "S": "5",
+        "s": "5",
+        "B": "8",
+        "v": "4",
+        "V": "4",
+        "-": ":",
+        "—": ":",
+        "–": ":",
+        ";": ":",
+        ",": ":",
+        ".": ":",
+        "*": ":",
+        "·": ":",
+        " ": "",
+    }
+
+    for caracter, reemplazo in reemplazos.items():
+        hora = hora.replace(caracter, reemplazo)
+
+    # Mantener solo dígitos y el separador de hora
+    hora = re.sub(r"[^0-9:]", "", hora)
+
+    # Si hay más de un separador, conservar solo el primero
+    if hora.count(":") > 1:
+        primera_pos = hora.find(":")
+        hora = hora[: primera_pos + 1] + hora[primera_pos + 1 :].replace(":", "")
+
+    # Insertar separador cuando falte pero la longitud sea compatible con HHMM
+    if ":" not in hora and len(hora) == 4:
+        hora = f"{hora[:2]}:{hora[2:]}"
+
+    match = re.match(r"^(\d{1,2}):(\d{2})$", hora)
+    if not match:
+        return None
+
+    h, m = int(match[1]), match[2]
+    if h > 29 or int(m) > 59:
+        # Horas con valores fuera de rango razonable
+        return None
+
+    return f"{h:02}:{m}"
 
 def limpiar_estado(simbolo: str) -> str:
     """Convierte símbolos OCR a estado de texto"""
@@ -111,32 +160,34 @@ def procesar_tabla(imagen):
         
         try:
             # Primero, buscar todas las letras, folios, horas y estados en los resultados
-            
             logger.info("Iniciando búsqueda de componentes en resultados OCR...")
-            
+
             for i, texto in enumerate(result):
                 texto = texto.strip()
                 logger.debug(f"Procesando elemento {i}: '{texto}'")
-                
-                # Detecta letra inicial (ej. A)
-                if re.match(r"^[A-Z]$", texto):
-                    letras_encontradas.append((i, texto))
-                    logger.info(f"Letra detectada en posición {i}: {texto}")
-                
-                # Detecta folio (número de 3-4 dígitos)
-                if re.match(r"^\d{3,4}$", texto):
-                    folios_encontrados.append((i, texto))
-                    logger.info(f"Folio detectado en posición {i}: {texto}")
-                
+
+                # Detecta letra inicial (ej. A) permitiendo ruido adicional
+                texto_letra = re.sub(r"[^A-Za-z]", "", texto)
+                if len(texto_letra) == 1 and texto_letra.isalpha():
+                    letra_normalizada = texto_letra.upper()
+                    letras_encontradas.append((i, letra_normalizada))
+                    logger.info(f"Letra detectada en posición {i}: {texto} -> {letra_normalizada}")
+
+                # Detecta folio (número de 3-4 dígitos, tolerando OCR ruidoso)
+                folio_normalizado = re.sub(r"\D", "", texto)
+                if 3 <= len(folio_normalizado) <= 4:
+                    folios_encontrados.append((i, folio_normalizado))
+                    logger.info(f"Folio detectado en posición {i}: {texto} -> {folio_normalizado}")
+
                 # Detecta hora (patrón HH:MM o H:MM)
                 try:
                     hora_normalizada = limpiar_hora(texto)
-                    if re.match(r"^\d{1,2}:\d{2}$", hora_normalizada):
+                    if hora_normalizada:
                         horas_encontradas.append((i, hora_normalizada, texto))
                         logger.info(f"Hora detectada en posición {i}: {texto} -> {hora_normalizada}")
                 except Exception as e:
                     logger.debug(f"Error procesando hora en posición {i}: {e}")
-                
+
                 # Detecta estado (símbolos)
                 try:
                     estado_temp = limpiar_estado(texto)
@@ -145,8 +196,13 @@ def procesar_tabla(imagen):
                         logger.info(f"Estado detectado en posición {i}: {texto} -> {estado_temp}")
                 except Exception as e:
                     logger.debug(f"Error procesando estado en posición {i}: {e}")
-            
-            logger.info(f"Resumen: {len(letras_encontradas)} letras, {len(folios_encontrados)} folios, {len(horas_encontradas)} horas, {len(estados_encontrados)} estados")
+
+            logger.info(
+                f"Resumen: {len(letras_encontradas)} letras, "
+                f"{len(folios_encontrados)} folios, "
+                f"{len(horas_encontradas)} horas, "
+                f"{len(estados_encontrados)} estados"
+            )
         except Exception as e:
             logger.error(f"Error al buscar componentes: {e}", exc_info=True)
             return f"Error: Error al procesar los resultados de OCR. {str(e)}"
@@ -157,32 +213,30 @@ def procesar_tabla(imagen):
         
         for folio_idx, folio_num in folios_encontrados:
             logger.debug(f"Procesando folio {folio_num} en posición {folio_idx}")
+
             # Buscar letra más cercana antes del folio
             letra_cercana = None
             for letra_idx, letra_text in letras_encontradas:
                 if letra_idx < folio_idx and (folio_idx - letra_idx) <= 5:
                     letra_cercana = letra_text
                     break
-            
+
             # Buscar hora más cercana después del folio
             hora_cercana = None
-            hora_raw = None
-            for hora_idx, hora_norm, hora_orig in horas_encontradas:
+            for hora_idx, hora_norm, _ in horas_encontradas:
                 if hora_idx > folio_idx and (hora_idx - folio_idx) <= 5:
                     hora_cercana = hora_norm
-                    hora_raw = hora_orig
                     break
-            
+
             # Buscar estado más cercano después de la hora (o después del folio si no hay hora)
             estado_cercano = None
             buscar_desde = folio_idx
             if hora_cercana:
-                # Buscar estado después de la hora
                 for hora_idx, _, _ in horas_encontradas:
                     if hora_idx > folio_idx:
                         buscar_desde = hora_idx
                         break
-            
+
             for estado_idx, estado_text, _ in estados_encontrados:
                 if estado_idx > buscar_desde and (estado_idx - buscar_desde) <= 5:
                     estado_cercano = estado_text
@@ -191,32 +245,44 @@ def procesar_tabla(imagen):
             # Si no encontramos estado, usar "indefinido"
             if not estado_cercano:
                 estado_cercano = "indefinido"
-            
-            # Si tenemos letra, folio y hora, crear el registro
-            if letra_cercana and folio_num and hora_cercana:
-                # Procesar la hora (convertir horas tempranas)
+
+            # Si tenemos folio y hora, crear el registro (letra opcional con fallback)
+            if folio_num and hora_cercana:
                 match_hora = re.match(r"(\d{1,2}):(\d{2})", hora_cercana)
                 if match_hora:
                     h = int(match_hora.group(1))
                     m = match_hora.group(2)
-                    
+
                     # Si la hora es temprana (1:00-4:59), probablemente es AM del siguiente día
                     if h < 5:
                         hora_final = f"{h+24}:{m}"
                     else:
                         hora_final = f"{h:02d}:{m}"
-                    
+
                     folio_completo = f"{prefijo_detectado}{folio_num}"
+                    letra_final = letra_cercana or f"fila_{len(datos)+1:02d}"
+                    if not letra_cercana:
+                        logger.debug(
+                            f"No se detectó letra para folio {folio_completo}; "
+                            f"se asigna identificador por defecto {letra_final}"
+                        )
+
                     datos.append({
-                        "id": letra_cercana,
+                        "id": letra_final,
                         "folio": folio_num,
                         "folio_completo": folio_completo,
                         "hora": hora_final,
                         "estado": estado_cercano
                     })
-                    logger.info(f"Registro creado: Letra={letra_cercana}, Folio={folio_completo}, Hora={hora_final}, Estado={estado_cercano}")
+                    logger.info(
+                        f"Registro creado: Letra={letra_final}, "
+                        f"Folio={folio_completo}, Hora={hora_final}, Estado={estado_cercano}"
+                    )
             else:
-                logger.debug(f"No se pudo crear registro para folio {folio_num}: letra={letra_cercana}, hora={hora_cercana}")
+                logger.debug(
+                    f"No se pudo crear registro para folio {folio_num}: "
+                    f"letra={letra_cercana}, hora={hora_cercana}"
+                )
 
         if not datos:
             # Proporcionar información más detallada sobre qué se detectó
