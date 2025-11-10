@@ -1,7 +1,6 @@
 import easyocr
 import re
 import logging
-from datetime import datetime
 from functools import lru_cache
 from typing import Optional
 from supabase import create_client, Client
@@ -79,6 +78,30 @@ def limpiar_hora(hora_raw: str) -> Optional[str]:
         return None
 
     return f"{h:02}:{m}"
+
+
+def valor_orden_hora(hora: str) -> int:
+    """
+    Convierte una hora en minutos corridos, aplicando un offset de +24h
+    para horas de madrugada (00:00-04:59) con el fin de mantener el orden cronológico.
+    """
+    if not hora or ":" not in hora:
+        raise ValueError(f"Hora inválida para ordenar: {hora!r}")
+
+    try:
+        h_str, m_str = hora.split(":")
+        h = int(h_str)
+        m = int(m_str)
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"Hora inválida para ordenar: {hora!r}") from exc
+
+    if not (0 <= h <= 23 and 0 <= m <= 59):
+        raise ValueError(f"Hora fuera de rango para ordenar: {hora!r}")
+
+    if h < 5:
+        h += 24
+
+    return h * 60 + m
 
 def limpiar_estado(simbolo: str) -> str:
     """Convierte símbolos OCR a estado de texto"""
@@ -253,11 +276,13 @@ def procesar_tabla(imagen):
                     h = int(match_hora.group(1))
                     m = match_hora.group(2)
 
-                    # Si la hora es temprana (1:00-4:59), probablemente es AM del siguiente día
                     if h < 5:
-                        hora_final = f"{h+24}:{m}"
-                    else:
-                        hora_final = f"{h:02d}:{m}"
+                        logger.debug(
+                            f"Hora {hora_cercana} interpretada como madrugada; "
+                            f"se almacenará como {h:02d}:{m} aplicando offset para ordenamiento."
+                        )
+
+                    hora_final = f"{h:02d}:{m}"
 
                     folio_completo = f"{prefijo_detectado}{folio_num}"
                     letra_final = letra_cercana or f"fila_{len(datos)+1:02d}"
@@ -277,6 +302,10 @@ def procesar_tabla(imagen):
                     logger.info(
                         f"Registro creado: Letra={letra_final}, "
                         f"Folio={folio_completo}, Hora={hora_final}, Estado={estado_cercano}"
+                    )
+                else:
+                    logger.debug(
+                        f"Hora '{hora_cercana}' no coincide con patrón esperado para folio {folio_num}"
                     )
             else:
                 logger.debug(
@@ -299,7 +328,7 @@ def procesar_tabla(imagen):
 
         # Ordenar por hora
         try:
-            datos_ordenados = sorted(datos, key=lambda x: datetime.strptime(x["hora"], "%H:%M"))
+            datos_ordenados = sorted(datos, key=lambda x: valor_orden_hora(x["hora"]))
         except ValueError as e:
             logger.warning(f"Error ordenando por hora: {e}, usando orden original")
             datos_ordenados = datos
