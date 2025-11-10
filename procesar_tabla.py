@@ -3,12 +3,20 @@ import re
 import logging
 from functools import lru_cache
 from typing import Optional, List, Dict
+
 from supabase import create_client, Client
+
 from config import SUPABASE_URL, SUPABASE_KEY
 
 logger = logging.getLogger(__name__)
 
-reader = easyocr.Reader(["es"], gpu=False)
+DEFAULT_PREFIJO = "168"
+CHECK_SYMBOLS = {"✅", "✔", "✓", "☑", "√"}
+CROSS_SYMBOLS = {"❌", "✖", "✕", "✗", "✘", "⚠", "⚠️"}
+CHECK_WORDS = {"ok", "si", "sí", "hecho", "listo", "done", "v", "va", "yes"}
+CROSS_WORDS = {"no", "pendiente", "falta", "x", "fail"}
+
+reader = easyocr.Reader(["es", "en"], gpu=False)
 
 
 @lru_cache(maxsize=1)
@@ -97,12 +105,23 @@ def valor_orden_hora(hora: str) -> int:
 
 
 def limpiar_estado(simbolo: str) -> str:
-    """Convierte símbolos OCR a estado de texto"""
-    s = simbolo.strip().lower()
-    if any(x in s for x in ["✔", "✓", "√", "v"]):
+    """Convierte símbolos OCR a estado de texto."""
+    if not simbolo:
+        return "indefinido"
+
+    simbolo_limpio = simbolo.strip()
+    if not simbolo_limpio:
+        return "indefinido"
+
+    simbolo_lower = simbolo_limpio.lower()
+
+    if any(mark in simbolo_limpio for mark in CHECK_SYMBOLS) or simbolo_lower in CHECK_WORDS:
         return "completado"
-    if any(x in s for x in ["⚠", "x", "?"]):
+    if any(mark in simbolo_limpio for mark in CROSS_SYMBOLS) or simbolo_lower in CROSS_WORDS:
         return "pendiente"
+    if "?" in simbolo_limpio:
+        return "pendiente"
+
     return "indefinido"
 
 
@@ -119,120 +138,202 @@ def estado_a_icono(estado: str) -> str:
 
 
 def es_comilla(texto: str) -> bool:
-    """Detecta si un texto es una comilla o símbolo de repetición"""
+    """Detecta si un texto es una comilla o símbolo de repetición."""
     texto_limpio = texto.strip()
     return texto_limpio in ['"', "'", "''", '""', ",,", "٠٠", "ʻʻ", "``"]
 
 
-def extraer_filas_secuenciales(result: List[str]) -> List[Dict]:
-    """
-    Extrae filas de la tabla procesando elementos secuencialmente.
-    Detecta patrón: [Letra/Comilla] [Folio/Comilla] [Hora] [Estado opcional]
-    """
-    filas = []
-    ultima_letra = None
-    ultimo_folio_base = None
+def normalizar_token(texto: str) -> str:
+    """Limpia ruido común del OCR (comillas, espacios extra)."""
+    if not texto:
+        return ""
 
-    i = 0
-    while i < len(result):
-        texto = result[i].strip()
-        logger.debug(f"Posición {i}: '{texto}'")
+    return (
+        texto.strip()
+        .replace('"', "")
+        .replace("“", "")
+        .replace("”", "")
+        .replace("«", "")
+        .replace("»", "")
+    )
 
-        if not texto:
-            i += 1
+
+def detectar_estado_token(token: str) -> Optional[str]:
+    """Intenta inferir el estado a partir de un token OCR."""
+    if not token:
+        return None
+
+    token_limpio = token.strip()
+    if not token_limpio:
+        return None
+
+    token_lower = token_limpio.lower()
+
+    if token_lower in CHECK_WORDS or any(mark in token_limpio for mark in CHECK_SYMBOLS):
+        return "completado"
+    if token_lower in CROSS_WORDS or any(mark in token_limpio for mark in CROSS_SYMBOLS):
+        return "pendiente"
+
+    return None
+
+
+def extraer_filas_lineal(textos: List[str], prefijo_manual: Optional[str] = None) -> List[Dict[str, Optional[str]]]:
+    """
+    Extrae filas recorriendo los tokens en orden y aplicando reglas heurísticas.
+    Devuelve una lista de diccionarios con claves: letra, prefijo, folio, folio_base, hora, estado, icono.
+    """
+    filas: List[Dict[str, Optional[str]]] = []
+    prefijo_actual = prefijo_manual
+    letra_actual: Optional[str] = None
+    ultima_letra_reportada: Optional[str] = None
+    ultimo_folio_completo: Optional[str] = None
+    ultimo_folio_base: Optional[str] = None
+    fila_actual: Dict[str, Optional[str]] = {}
+
+    def prefijo_por_defecto() -> str:
+        return prefijo_actual or prefijo_manual or DEFAULT_PREFIJO
+
+    def commit():
+        nonlocal fila_actual, prefijo_actual, ultima_letra_reportada, ultimo_folio_completo, ultimo_folio_base
+        if not fila_actual:
+            return
+
+        folio_completo = fila_actual.get("folio")
+        hora_val = fila_actual.get("hora")
+
+        if not folio_completo or not hora_val:
+            fila_actual = {}
+            return
+
+        prefijo_val = fila_actual.get("prefijo") or prefijo_por_defecto()
+        folio_base = fila_actual.get("folio_base")
+
+        prefijo_val_str = str(prefijo_val) if prefijo_val is not None else ""
+        if not folio_base and prefijo_val_str and folio_completo.startswith(prefijo_val_str):
+            folio_base = folio_completo[len(prefijo_val_str) :]
+
+        estado_texto = fila_actual.get("estado") or "indefinido"
+        icono = fila_actual.get("icono") or estado_a_icono(estado_texto)
+        letra = fila_actual.get("letra") or letra_actual or ultima_letra_reportada
+
+        fila = {
+            "letra": letra,
+            "prefijo": prefijo_val,
+            "folio": folio_completo,
+            "folio_base": folio_base,
+            "hora": hora_val,
+            "estado": estado_texto,
+            "icono": icono,
+        }
+
+        filas.append(fila)
+
+        if letra:
+            ultima_letra_reportada = letra
+        if folio_completo:
+            ultimo_folio_completo = folio_completo
+        if folio_base:
+            ultimo_folio_base = folio_base
+        if prefijo_val:
+            prefijo_actual = prefijo_val
+
+        fila_actual = {}
+
+    for idx, token in enumerate(textos):
+        token_normalizado = normalizar_token(token)
+        if not token_normalizado:
             continue
 
-        fila: Dict[str, Optional[str]] = {}
+        logger.debug(f"Token {idx}: '{token}' -> '{token_normalizado}'")
 
-        # 1. Detectar LETRA o COMILLA
-        if es_comilla(texto):
-            fila["letra"] = ultima_letra
-            logger.debug(f"  -> Letra (comilla): {ultima_letra}")
-            i += 1
-        elif len(texto) == 1 and texto.isalpha():
-            fila["letra"] = texto.upper()
-            ultima_letra = fila["letra"]
-            logger.debug(f"  -> Letra: {fila['letra']}")
-            i += 1
-        else:
-            fila["letra"] = ultima_letra
-            logger.debug(f"  -> Letra (default): {ultima_letra}")
-
-        # 2. Detectar FOLIO o COMILLA
-        if i < len(result):
-            texto = result[i].strip()
-            logger.debug(f"Posición {i}: '{texto}'")
-
-            if es_comilla(texto):
-                fila["folio"] = ultimo_folio_base
-                logger.debug(f"  -> Folio (comilla): {ultimo_folio_base}")
-                i += 1
+        if es_comilla(token_normalizado):
+            if not fila_actual:
+                fila_actual = {
+                    "letra": letra_actual or ultima_letra_reportada,
+                    "prefijo": prefijo_por_defecto(),
+                    "folio": ultimo_folio_completo,
+                    "folio_base": ultimo_folio_base,
+                }
             else:
-                folio_match = re.search(r"(\d{4})", texto)
-                if folio_match:
-                    fila["folio"] = folio_match.group(1)
-                    ultimo_folio_base = fila["folio"]
-                    logger.debug(f"  -> Folio: {fila['folio']}")
-                    i += 1
-                else:
-                    fila["folio"] = ultimo_folio_base
-                    logger.debug(f"  -> Folio (default): {ultimo_folio_base}")
+                fila_actual.setdefault("letra", letra_actual or ultima_letra_reportada)
+                if ultimo_folio_completo and not fila_actual.get("folio"):
+                    fila_actual["folio"] = ultimo_folio_completo
+                    fila_actual["folio_base"] = ultimo_folio_base
+                    fila_actual.setdefault("prefijo", prefijo_por_defecto())
+            continue
 
-        # 3. Detectar HORA
-        if i < len(result):
-            texto = result[i].strip()
-            logger.debug(f"Posición {i}: '{texto}'")
+        if len(token_normalizado) == 1 and token_normalizado.isalpha():
+            commit()
+            letra_actual = token_normalizado.upper()
+            continue
 
-            hora_limpia = limpiar_hora(texto)
-            if hora_limpia:
-                fila["hora"] = hora_limpia
-                logger.debug(f"  -> Hora: {fila['hora']}")
-                i += 1
+        if re.fullmatch(r"\d{3,7}", token_normalizado):
+            commit()
+            numero = token_normalizado
+            if len(numero) > 5:
+                prefijo_actual = numero[:3]
+                folio_base = numero[len(prefijo_actual) :] or numero[3:]
+                if not folio_base:
+                    folio_base = numero[len(prefijo_actual) :]
+                folio_completo = numero
+                prefijo_fila = prefijo_actual
             else:
-                logger.debug("  -> No se detectó hora válida")
-                i += 1
+                prefijo_fila = prefijo_por_defecto()
+                prefijo_actual = prefijo_fila
+                folio_base = numero
+                folio_completo = f"{prefijo_fila}{folio_base}" if prefijo_fila else numero
+
+            fila_actual = {
+                "letra": letra_actual or ultima_letra_reportada,
+                "prefijo": prefijo_fila,
+                "folio": folio_completo,
+                "folio_base": folio_base,
+            }
+            continue
+
+        if re.fullmatch(r"\d{1,2}[:.]\d{2}", token_normalizado):
+            hora_val = limpiar_hora(token_normalizado.replace(".", ":"))
+            if not hora_val:
                 continue
-        else:
-            break
 
-        # 4. Detectar ESTADO (opcional)
-        if i < len(result):
-            texto = result[i].strip()
-            logger.debug(f"Posición {i}: '{texto}'")
+            if not fila_actual:
+                fila_actual = {
+                    "letra": letra_actual or ultima_letra_reportada,
+                    "prefijo": prefijo_por_defecto(),
+                    "folio": ultimo_folio_completo,
+                    "folio_base": ultimo_folio_base,
+                }
 
-            estado = limpiar_estado(texto)
-            if estado != "indefinido":
-                fila["estado"] = estado
-                logger.debug(f"  -> Estado: {fila['estado']}")
-                i += 1
-            else:
-                if i + 1 < len(result):
-                    siguiente = result[i + 1].strip()
-                    estado_sig = limpiar_estado(siguiente)
-                    if estado_sig != "indefinido":
-                        fila["estado"] = estado_sig
-                        logger.debug(f"  -> Estado (siguiente): {fila['estado']}")
-                        i += 2
-                    else:
-                        fila["estado"] = "indefinido"
-                        logger.debug("  -> Estado: indefinido")
-                else:
-                    fila["estado"] = "indefinido"
-                    logger.debug("  -> Estado: indefinido")
-        else:
-            fila["estado"] = "indefinido"
+            fila_actual["hora"] = hora_val
+            continue
 
-        if fila.get("folio") and fila.get("hora"):
-            filas.append(fila)
-            logger.info(f"Fila añadida: {fila}")
-        else:
-            logger.debug(f"Fila descartada (datos incompletos): {fila}")
+        estado_detectado = detectar_estado_token(token_normalizado)
+        if estado_detectado:
+            if not fila_actual:
+                fila_actual = {
+                    "letra": letra_actual or ultima_letra_reportada,
+                    "prefijo": prefijo_por_defecto(),
+                    "folio": ultimo_folio_completo,
+                    "folio_base": ultimo_folio_base,
+                }
+
+            fila_actual["estado"] = estado_detectado
+            fila_actual["icono"] = estado_a_icono(estado_detectado)
+
+            if fila_actual.get("folio") and fila_actual.get("hora"):
+                commit()
+            continue
+
+        if fila_actual.get("folio") and fila_actual.get("hora"):
+            commit()
+
+    commit()
 
     return filas
 
 
-def procesar_tabla(imagen):
-    """Lee una tabla escrita a mano con EasyOCR, limpia, ordena y guarda en Supabase"""
+def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
+    """Lee una tabla escrita a mano con EasyOCR, limpia, ordena y guarda en Supabase."""
     try:
         logger.info(f"Iniciando procesamiento de tabla desde imagen: {imagen}")
 
@@ -242,74 +343,71 @@ def procesar_tabla(imagen):
             logger.error(f"Error en OCR: {e}")
             return f"Error: No se pudo leer el texto de la imagen. {str(e)}"
 
-        if not result or len(result) == 0:
+        if not result:
             return "Error: No se detectó texto en la imagen."
 
-        logger.info(f"OCR detectó {len(result)} elementos")
-        logger.info(f"Elementos OCR: {result}")
+        logger.info(f"OCR detectó {len(result)} elementos brutos")
+        logger.debug(f"Elementos OCR brutos: {result}")
 
-        prefijo_detectado = "168"
-        for text in result:
-            text_clean = text.strip()
-            if re.match(r"^\d{7}$", text_clean):
-                prefijo_detectado = text_clean[:3]
-                logger.info(f"Prefijo detectado: {prefijo_detectado}")
-                break
+        textos: List[str] = []
+        for raw in result:
+            normalizado = normalizar_token(raw)
+            if normalizado:
+                textos.append(normalizado)
 
-        filas = extraer_filas_secuenciales(result)
+        logger.info(f"{len(textos)} tokens normalizados tras limpieza")
+        logger.debug(f"Tokens normalizados: {textos}")
+
+        filas = extraer_filas_lineal(textos, prefijo_manual)
 
         if not filas:
-            return f"Error: No se pudieron extraer filas válidas. Elementos detectados: {result[:10]}"
+            return f"Error: No se pudieron extraer filas válidas. Elementos detectados: {textos[:10]}"
 
-        logger.info(f"Se extrajeron {len(filas)} filas")
-
-        datos_finales = []
-        for idx, fila in enumerate(filas):
-            letra = fila.get("letra") or f"L{idx + 1}"
-            folio_base = fila["folio"]
-            folio_completo = f"{prefijo_detectado}{folio_base}"
-            hora = fila["hora"]
-            estado = fila.get("estado", "indefinido")
-
-            datos_finales.append(
-                {
-                    "id": letra,
-                    "folio": folio_base,
-                    "folio_completo": folio_completo,
-                    "hora": hora,
-                    "estado": estado,
-                }
-            )
+        logger.info(f"Se extrajeron {len(filas)} filas candidatas")
 
         try:
-            datos_ordenados = sorted(datos_finales, key=lambda x: valor_orden_hora(x["hora"]))
+            filas_ordenadas = sorted(filas, key=lambda x: valor_orden_hora(x["hora"]))
         except ValueError as e:
-            logger.warning(f"Error ordenando: {e}")
-            datos_ordenados = datos_finales
+            logger.warning(f"Error ordenando filas por hora: {e}")
+            filas_ordenadas = filas
 
-        tabla_filas = []
-        for row in datos_ordenados:
-            folio_con_letra = f"{row['id']}{row['folio_completo']}"
-            tabla_filas.append(
+        registros_preparados: List[Dict[str, str]] = []
+        for idx, fila in enumerate(filas_ordenadas, start=1):
+            letra = fila.get("letra") or f"L{idx}"
+            folio_completo = fila.get("folio")
+            hora_val = fila.get("hora")
+            estado_texto = fila.get("estado") or "indefinido"
+            icono = fila.get("icono") or estado_a_icono(estado_texto)
+
+            if not folio_completo or not hora_val:
+                logger.debug(f"Fila descartada (datos incompletos): {fila}")
+                continue
+
+            registros_preparados.append(
                 {
-                    "folio": folio_con_letra,
-                    "hora": row["hora"],
-                    "icono": estado_a_icono(row["estado"]),
+                    "id": str(letra).strip(),
+                    "folio": str(folio_completo).strip(),
+                    "hora": str(hora_val).strip(),
+                    "estado": str(estado_texto).strip(),
+                    "icono": icono,
                 }
             )
+
+        if not registros_preparados:
+            return "Error: No se pudieron preparar registros válidos a partir del OCR."
 
         try:
             supabase = get_supabase_client()
             registros_insertados = 0
             errores = []
 
-            for row in datos_ordenados:
+            for row in registros_preparados:
                 try:
                     datos_insert = {
-                        "id": str(row["id"]).strip(),
-                        "folio": str(row["folio_completo"]).strip(),
-                        "hora": str(row["hora"]).strip(),
-                        "estado": str(row["estado"]).strip(),
+                        "id": row["id"],
+                        "folio": row["folio"],
+                        "hora": row["hora"],
+                        "estado": row["estado"],
                     }
 
                     if not all(datos_insert.values()):
@@ -329,15 +427,12 @@ def procesar_tabla(imagen):
                     else:
                         errores.append(f"Error DB: {error_msg[:50]}")
 
-            logger.info(f"Insertados {registros_insertados} de {len(datos_ordenados)}")
+            mensaje = f"Procesados {len(registros_preparados)} registros, {registros_insertados} insertados exitosamente."
 
-            mensaje = f"Procesados {len(datos_ordenados)} registros, {registros_insertados} insertados exitosamente."
-
-            if tabla_filas:
-                tabla_lineas = ["Folio | Hora | Status", "----- | ---- | ------"]
-                for fila in tabla_filas:
-                    tabla_lineas.append(f"{fila['folio']} | {fila['hora']} | {fila['icono']}")
-                mensaje += "\n\n" + "\n".join(tabla_lineas)
+            tabla_lineas = ["Folio | Hora | Status", "----- | ---- | ------"]
+            for row in registros_preparados:
+                tabla_lineas.append(f"{row['id']}{row['folio']} | {row['hora']} | {row['icono']}")
+            mensaje += "\n\n" + "\n".join(tabla_lineas)
 
             if errores:
                 mensaje += f"\n\n⚠️ {len(errores)} error(es): {'; '.join(errores[:2])}"
