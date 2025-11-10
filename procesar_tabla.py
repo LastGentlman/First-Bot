@@ -2,7 +2,7 @@ import easyocr
 import re
 import logging
 from functools import lru_cache
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any, Tuple
 
 from supabase import create_client, Client
 
@@ -148,14 +148,29 @@ def normalizar_token(texto: str) -> str:
     if not texto:
         return ""
 
-    return (
-        texto.strip()
-        .replace('"', "")
-        .replace("“", "")
-        .replace("”", "")
-        .replace("«", "")
-        .replace("»", "")
-    )
+    texto_limpio = texto.strip()
+    if not texto_limpio:
+        return ""
+
+    reemplazos_comillas = {
+        "“": '"',
+        "”": '"',
+        "«": '"',
+        "»": '"',
+    }
+
+    for original, reemplazo in reemplazos_comillas.items():
+        texto_limpio = texto_limpio.replace(original, reemplazo)
+
+    marcas_repeticion = {'"', "'", "''", '""', ",,", "٠٠", "ʻʻ", "``"}
+    if texto_limpio in marcas_repeticion:
+        return texto_limpio
+
+    # Conserva la comilla doble si es el único carácter del token (marca de repetición habitual).
+    if len(texto_limpio) > 1:
+        texto_limpio = texto_limpio.replace('"', "")
+
+    return texto_limpio
 
 
 def detectar_estado_token(token: str) -> Optional[str]:
@@ -175,6 +190,105 @@ def detectar_estado_token(token: str) -> Optional[str]:
         return "pendiente"
 
     return None
+
+
+def _misma_fila(fila: Dict[str, float], elemento: Dict[str, float], tolerancia: float = 0.45) -> bool:
+    """Determina si un token pertenece a la misma fila en función de su posición vertical."""
+    fila_altura = max(fila["y_max"] - fila["y_min"], 1.0)
+    elemento_altura = max(elemento["height"], 1.0)
+    margen = max(fila_altura, elemento_altura) * tolerancia
+
+    por_debajo = elemento["y_min"] > fila["y_max"] + margen
+    por_encima = elemento["y_max"] < fila["y_min"] - margen
+
+    return not (por_debajo or por_encima)
+
+
+def ordenar_tokens_por_posicion(resultados_ocr: List[Any]) -> Tuple[List[str], List[List[str]]]:
+    """
+    Utiliza las coordenadas devueltas por EasyOCR para ordenar los tokens de izquierda a derecha y de arriba hacia abajo.
+    Devuelve la lista plana de tokens en orden de lectura y, adicionalmente, las filas detectadas para depuración.
+    """
+    elementos: List[Dict[str, Any]] = []
+
+    for entrada in resultados_ocr:
+        if not entrada:
+            continue
+
+        if len(entrada) == 3:
+            bbox, texto, confianza = entrada
+        elif len(entrada) == 2:
+            bbox, texto = entrada
+            confianza = None
+        else:
+            logger.debug(f"Formato de resultado OCR inesperado: {entrada}")
+            continue
+
+        texto_crudo = (texto or "").strip()
+        if not texto_crudo:
+            continue
+
+        try:
+            xs = [float(p[0]) for p in bbox]
+            ys = [float(p[1]) for p in bbox]
+        except (TypeError, ValueError) as exc:
+            logger.debug(f"No se pudieron extraer coordenadas de {entrada}: {exc}")
+            continue
+
+        x_min = min(xs)
+        x_max = max(xs)
+        y_min = min(ys)
+        y_max = max(ys)
+
+        elementos.append(
+            {
+                "texto": texto_crudo,
+                "confianza": confianza,
+                "x_min": x_min,
+                "x_max": x_max,
+                "y_min": y_min,
+                "y_max": y_max,
+                "center_x": (x_min + x_max) / 2,
+                "center_y": (y_min + y_max) / 2,
+                "width": max(x_max - x_min, 1.0),
+                "height": max(y_max - y_min, 1.0),
+            }
+        )
+
+    if not elementos:
+        return [], []
+
+    filas: List[Dict[str, Any]] = []
+
+    for elemento in sorted(elementos, key=lambda e: e["center_y"]):
+        asignado = False
+        for fila in filas:
+            if _misma_fila(fila, elemento):
+                fila["elementos"].append(elemento)
+                fila["y_min"] = min(fila["y_min"], elemento["y_min"])
+                fila["y_max"] = max(fila["y_max"], elemento["y_max"])
+                asignado = True
+                break
+        if not asignado:
+            filas.append(
+                {
+                    "elementos": [elemento],
+                    "y_min": elemento["y_min"],
+                    "y_max": elemento["y_max"],
+                }
+            )
+
+    filas_ordenadas = sorted(filas, key=lambda f: f["y_min"])
+    filas_texto: List[List[str]] = []
+    tokens_ordenados: List[str] = []
+
+    for fila in filas_ordenadas:
+        fila["elementos"].sort(key=lambda e: e["center_x"])
+        fila_texto = [elem["texto"] for elem in fila["elementos"]]
+        filas_texto.append(fila_texto)
+        tokens_ordenados.extend(fila_texto)
+
+    return tokens_ordenados, filas_texto
 
 
 def extraer_filas_lineal(textos: List[str], prefijo_manual: Optional[str] = None) -> List[Dict[str, Optional[str]]]:
@@ -338,7 +452,7 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
         logger.info(f"Iniciando procesamiento de tabla desde imagen: {imagen}")
 
         try:
-            result = reader.readtext(imagen, detail=0)
+            result = reader.readtext(imagen, detail=1, paragraph=False)
         except Exception as e:
             logger.error(f"Error en OCR: {e}")
             return f"Error: No se pudo leer el texto de la imagen. {str(e)}"
@@ -349,14 +463,22 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
         logger.info(f"OCR detectó {len(result)} elementos brutos")
         logger.debug(f"Elementos OCR brutos: {result}")
 
+        tokens_ordenados, filas_detectadas = ordenar_tokens_por_posicion(result)
+
+        if not tokens_ordenados:
+            return "Error: No se pudo reconstruir el orden de lectura de la tabla."
+
+        logger.info(f"{len(tokens_ordenados)} tokens tras ordenar por posición (filas detectadas: {len(filas_detectadas)})")
+        logger.debug(f"Filas detectadas (OCR): {filas_detectadas}")
+
         textos: List[str] = []
-        for raw in result:
+        for raw in tokens_ordenados:
             normalizado = normalizar_token(raw)
             if normalizado:
                 textos.append(normalizado)
 
         logger.info(f"{len(textos)} tokens normalizados tras limpieza")
-        logger.debug(f"Tokens normalizados: {textos}")
+        logger.debug(f"Tokens normalizados ordenados: {textos}")
 
         filas = extraer_filas_lineal(textos, prefijo_manual)
 
@@ -365,14 +487,10 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
 
         logger.info(f"Se extrajeron {len(filas)} filas candidatas")
 
-        try:
-            filas_ordenadas = sorted(filas, key=lambda x: valor_orden_hora(x["hora"]))
-        except ValueError as e:
-            logger.warning(f"Error ordenando filas por hora: {e}")
-            filas_ordenadas = filas
+        filas_en_orden = filas
 
         registros_preparados: List[Dict[str, str]] = []
-        for idx, fila in enumerate(filas_ordenadas, start=1):
+        for idx, fila in enumerate(filas_en_orden, start=1):
             letra = fila.get("letra") or f"L{idx}"
             folio_completo = fila.get("folio")
             hora_val = fila.get("hora")
