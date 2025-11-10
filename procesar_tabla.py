@@ -112,6 +112,20 @@ def limpiar_estado(simbolo: str) -> str:
         return "pendiente"
     return "indefinido"
 
+
+def estado_a_icono(estado: str) -> str:
+    """Mapea el estado textual a un icono representativo para mostrar en resultados."""
+    if not estado:
+        return "❔"
+    estado_normalizado = estado.strip().lower()
+    if estado_normalizado == "completado":
+        return "✅"
+    if estado_normalizado == "pendiente":
+        return "⚠️"
+    if estado_normalizado == "indefinido":
+        return "❔"
+    return estado
+
 def completar_comillas(filas):
     """Rellena valores con comillas usando el último valor conocido"""
     ultimos = {"id": None, "folio": None, "hora": None, "estado": None}
@@ -333,6 +347,22 @@ def procesar_tabla(imagen):
             logger.warning(f"Error ordenando por hora: {e}, usando orden original")
             datos_ordenados = datos
 
+        # Preparar filas para la tabla de salida
+        tabla_filas = []
+        for row in datos_ordenados:
+            id_valor = str(row.get("id") or "").strip()
+            folio_base = str(row.get("folio_completo") or row.get("folio") or "").strip()
+            if id_valor and len(id_valor) == 1 and id_valor.isalpha() and folio_base:
+                folio_con_letra = f"{id_valor.upper()}{folio_base}"
+            else:
+                folio_con_letra = folio_base or id_valor or "-"
+
+            tabla_filas.append({
+                "folio": folio_con_letra,
+                "hora": str(row.get("hora") or "").strip() or "-",
+                "icono": estado_a_icono(row.get("estado"))
+            })
+
         # Insertar en Supabase
         try:
             supabase = get_supabase_client()
@@ -396,6 +426,13 @@ def procesar_tabla(imagen):
             
             # Construir mensaje de resultado
             mensaje_resultado = f"Procesados {len(datos_ordenados)} registros, {registros_insertados} insertados exitosamente."
+            tabla_texto = ""
+
+            if tabla_filas:
+                tabla_lineas = ["Folio | Hora | Status", "----- | ---- | ------"]
+                for fila in tabla_filas:
+                    tabla_lineas.append(f"{fila['folio']} | {fila['hora']} | {fila['icono']}")
+                tabla_texto = "\n\n" + "\n".join(tabla_lineas)
             
             if errores:
                 mensaje_resultado += f"\n⚠️ {len(errores)} error(es): " + "; ".join(errores[:3])  # Mostrar solo los primeros 3 errores
@@ -403,10 +440,17 @@ def procesar_tabla(imagen):
                     mensaje_resultado += f" ... y {len(errores) - 3} más"
             
             if registros_insertados == 0:
-                return f"Error: No se pudieron insertar registros en la base de datos. Se procesaron {len(datos_ordenados)} registros. " + \
-                       (f"Errores: {'; '.join(errores[:2])}" if errores else "Verifica el schema de la tabla 'registros' en Supabase.")
+                mensaje_error = (
+                    f"Error: No se pudieron insertar registros en la base de datos. "
+                    f"Se procesaron {len(datos_ordenados)} registros. "
+                )
+                mensaje_error += (
+                    f"Errores: {'; '.join(errores[:2])}"
+                    if errores else "Verifica el schema de la tabla 'registros' en Supabase."
+                )
+                return mensaje_error + tabla_texto
             
-            return mensaje_resultado
+            return mensaje_resultado + tabla_texto
             
         except Exception as e:
             error_msg = str(e)
