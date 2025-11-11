@@ -407,16 +407,18 @@ def detectar_prefijo_base(filas_texto: List[List[str]], prefijo_manual: Optional
             token_limpio = normalizar_token(token)
             if not token_limpio:
                 continue
-            
-            # Buscar números de 7 o más dígitos (prefijo + 4 dígitos mínimo)
-            match = re.fullmatch(r"\d{7,}", token_limpio)
-            if match:
-                numero_completo = match.group(0)
-                # Tomar todos los dígitos excepto los últimos 4
-                if len(numero_completo) > 4:
-                    prefijo_detectado = numero_completo[:-4]
-                    logger.info(f"Prefijo base detectado automáticamente: '{prefijo_detectado}' desde número '{numero_completo}'")
-                    return prefijo_detectado
+
+            token_digits = re.sub(r"\D", "", token_limpio)
+            if len(token_digits) >= 7:
+                numero_completo = token_digits
+                prefijo_detectado = numero_completo[:-4]
+                logger.info(
+                    "Prefijo base detectado automáticamente: '%s' desde token '%s' (normalizado a '%s')",
+                    prefijo_detectado,
+                    token_limpio,
+                    numero_completo,
+                )
+                return prefijo_detectado
     
     # Si no se detecta, retornar None (se intentará inferir de los números encontrados)
     logger.warning("No se pudo detectar prefijo base automáticamente. Se intentará inferir de los números encontrados.")
@@ -495,6 +497,8 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
             
             # Detectar número (folio completo o subfolio)
             match_numero = re.fullmatch(r"\d{3,}", token)
+            if not match_numero:
+                match_numero = re.search(r"\d{3,}", token)
             if match_numero:
                 numero = match_numero.group(0)
                 
