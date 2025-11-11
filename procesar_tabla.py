@@ -203,6 +203,23 @@ def estado_a_icono(estado: str) -> str:
     return "❔"
 
 
+def icono_a_estado(icono: str) -> str:
+    """Convierte un icono visual a su representación textual."""
+    if not icono:
+        return "indefinido"
+
+    icono_limpio = icono.strip()
+
+    if "✅" in icono_limpio:
+        return "completado"
+    if any(mark in icono_limpio for mark in {"⚠", "⚠️", "❌", "✖", "✕", "✗", "✘", "x", "X"}):
+        return "pendiente"
+    if "❔" in icono_limpio or "?" in icono_limpio:
+        return "indefinido"
+
+    return "indefinido"
+
+
 def es_comilla(texto: str) -> bool:
     """Detecta si un texto es una comilla o símbolo de repetición."""
     texto_limpio = texto.strip()
@@ -390,16 +407,18 @@ def detectar_prefijo_base(filas_texto: List[List[str]], prefijo_manual: Optional
             token_limpio = normalizar_token(token)
             if not token_limpio:
                 continue
-            
-            # Buscar números de 7 o más dígitos (prefijo + 4 dígitos mínimo)
-            match = re.fullmatch(r"\d{7,}", token_limpio)
-            if match:
-                numero_completo = match.group(0)
-                # Tomar todos los dígitos excepto los últimos 4
-                if len(numero_completo) > 4:
-                    prefijo_detectado = numero_completo[:-4]
-                    logger.info(f"Prefijo base detectado automáticamente: '{prefijo_detectado}' desde número '{numero_completo}'")
-                    return prefijo_detectado
+
+            token_digits = re.sub(r"\D", "", token_limpio)
+            if len(token_digits) >= 7:
+                numero_completo = token_digits
+                prefijo_detectado = numero_completo[:-4]
+                logger.info(
+                    "Prefijo base detectado automáticamente: '%s' desde token '%s' (normalizado a '%s')",
+                    prefijo_detectado,
+                    token_limpio,
+                    numero_completo,
+                )
+                return prefijo_detectado
     
     # Si no se detecta, retornar None (se intentará inferir de los números encontrados)
     logger.warning("No se pudo detectar prefijo base automáticamente. Se intentará inferir de los números encontrados.")
@@ -478,6 +497,8 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
             
             # Detectar número (folio completo o subfolio)
             match_numero = re.fullmatch(r"\d{3,}", token)
+            if not match_numero:
+                match_numero = re.search(r"\d{3,}", token)
             if match_numero:
                 numero = match_numero.group(0)
                 
@@ -656,6 +677,7 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
             folio_completo = fila.get("folio")
             hora_val = fila.get("hora")
             estado_icono = fila.get("estado") or "⚠️"  # Estado ya viene como icono (✅ o ⚠️)
+            estado_texto = icono_a_estado(estado_icono)
 
             if not folio_completo or not hora_val:
                 logger.debug(f"Fila descartada (datos incompletos): {fila}")
@@ -666,7 +688,7 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
                     "id": str(letra).strip(),
                     "folio": str(folio_completo).strip(),
                     "hora": str(hora_val).strip(),
-                    "estado": str(estado_icono).strip(),  # Estado como icono
+                    "estado": estado_texto,
                     "icono": estado_icono,  # Mantener compatibilidad
                 }
             )
