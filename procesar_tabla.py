@@ -203,6 +203,23 @@ def estado_a_icono(estado: str) -> str:
     return "❔"
 
 
+def icono_a_estado(icono: str) -> str:
+    """Convierte un icono visual a su representación textual."""
+    if not icono:
+        return "indefinido"
+
+    icono_limpio = icono.strip()
+
+    if "✅" in icono_limpio:
+        return "completado"
+    if any(mark in icono_limpio for mark in {"⚠", "⚠️", "❌", "✖", "✕", "✗", "✘", "x", "X"}):
+        return "pendiente"
+    if "❔" in icono_limpio or "?" in icono_limpio:
+        return "indefinido"
+
+    return "indefinido"
+
+
 def es_comilla(texto: str) -> bool:
     """Detecta si un texto es una comilla o símbolo de repetición."""
     texto_limpio = texto.strip()
@@ -656,6 +673,7 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
             folio_completo = fila.get("folio")
             hora_val = fila.get("hora")
             estado_icono = fila.get("estado") or "⚠️"  # Estado ya viene como icono (✅ o ⚠️)
+            estado_texto = icono_a_estado(estado_icono)
 
             if not folio_completo or not hora_val:
                 logger.debug(f"Fila descartada (datos incompletos): {fila}")
@@ -666,7 +684,7 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
                     "id": str(letra).strip(),
                     "folio": str(folio_completo).strip(),
                     "hora": str(hora_val).strip(),
-                    "estado": str(estado_icono).strip(),  # Estado como icono
+                    "estado": estado_texto,
                     "icono": estado_icono,  # Mantener compatibilidad
                 }
             )
