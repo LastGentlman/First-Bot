@@ -56,10 +56,47 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("Procesando tabla... 🧾")
             try:
                 resultado = procesar_tabla(filepath)
-                if isinstance(resultado, str) and resultado.startswith("Error:"):
-                    await update.message.reply_text(f"❌ {resultado}")
+
+                if isinstance(resultado, dict):
+                    if resultado.get("success"):
+                        tabla_texto = resultado.get("table")
+                        if tabla_texto:
+                            await update.message.reply_text(tabla_texto)
+                        else:
+                            resumen = resultado.get("summary") or "Tabla procesada sin datos para mostrar."
+                            await update.message.reply_text(f"✅ {resumen}")
+                    else:
+                        mensajes = []
+                        resumen = resultado.get("summary")
+                        if resumen:
+                            mensajes.append(f"⚠️ {resumen}")
+
+                        procesados = resultado.get("processed")
+                        insertados = resultado.get("inserted")
+                        if procesados is not None or insertados is not None:
+                            mensajes.append(
+                                f"Registros procesados: {procesados if procesados is not None else 'N/D'} | "
+                                f"Insertados: {insertados if insertados is not None else 'N/D'}"
+                            )
+
+                        tabla_texto = resultado.get("table")
+                        if tabla_texto:
+                            mensajes.append(tabla_texto)
+
+                        errores = resultado.get("errors") or []
+                        if errores:
+                            mensajes.append("Detalles de error:")
+                            mensajes.extend(f"- {error}" for error in errores)
+
+                        await update.message.reply_text("\n\n".join(mensajes) if mensajes else "❌ Ocurrió un error no especificado.")
+
+                elif isinstance(resultado, str):
+                    if resultado.startswith("Error:"):
+                        await update.message.reply_text(f"❌ {resultado}")
+                    else:
+                        await update.message.reply_text(resultado)
                 else:
-                    await update.message.reply_text(f"✅ Resultado: {resultado}")
+                    await update.message.reply_text("❌ Respuesta desconocida al procesar la tabla.")
             except Exception as e:
                 logger.error(f"Error procesando tabla: {e}", exc_info=True)
                 await update.message.reply_text(f"❌ Error al procesar la tabla: {str(e)}")

@@ -1,6 +1,7 @@
 import easyocr
 import re
 import logging
+import json
 from functools import lru_cache
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -9,6 +10,71 @@ from supabase import create_client, Client
 from config import SUPABASE_URL, SUPABASE_KEY
 
 logger = logging.getLogger(__name__)
+
+
+def _build_response(
+    success: bool,
+    summary: Optional[str] = None,
+    table: Optional[str] = None,
+    processed: Optional[int] = None,
+    inserted: Optional[int] = None,
+    errors: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    return {
+        "success": success,
+        "summary": summary,
+        "table": table,
+        "processed": processed,
+        "inserted": inserted,
+        "errors": errors or [],
+    }
+
+
+def _extraer_detalle_error(exc: Exception) -> str:
+    """
+    Intenta obtener un mensaje detallado desde diferentes atributos de la excepción.
+    Incluye objetos JSON serializados completos cuando están disponibles.
+    """
+    candidatos: List[Any] = []
+
+    if hasattr(exc, "args") and exc.args:
+        candidatos.extend(list(exc.args))
+
+    for attr in ("message", "msg", "detail", "details", "response"):
+        valor = getattr(exc, attr, None)
+        if valor and valor not in candidatos:
+            candidatos.append(valor)
+
+    candidatos.append(str(exc))
+
+    # Priorizar estructuras tipo dict
+    for candidato in candidatos:
+        if isinstance(candidato, dict):
+            try:
+                return json.dumps(candidato, ensure_ascii=False)
+            except TypeError:
+                return repr(candidato)
+
+    # Intentar interpretar strings como JSON antes de devolverlos
+    for candidato in candidatos:
+        if isinstance(candidato, str):
+            texto = candidato.strip()
+            if not texto:
+                continue
+            try:
+                datos = json.loads(texto)
+                return json.dumps(datos, ensure_ascii=False)
+            except json.JSONDecodeError:
+                return texto
+
+    return repr(exc)
+
+
+def _formatear_error_db(row: Dict[str, str], exc: Exception) -> str:
+    folio = row.get("folio") or "folio-desconocido"
+    identificador = row.get("id") or "id-desconocido"
+    detalle = _extraer_detalle_error(exc)
+    return f"Error DB en fila {identificador} ({folio}): {detalle}"
 
 # Prefijo base se detecta automáticamente desde los folios completos en la tabla
 CHECK_SYMBOLS = {"✅", "✔", "✓", "☑", "√", "✓", "✔"}
@@ -543,10 +609,18 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
             result = reader.readtext(imagen, detail=1, paragraph=False)
         except Exception as e:
             logger.error(f"Error en OCR: {e}")
-            return f"Error: No se pudo leer el texto de la imagen. {str(e)}"
+            detalle = _extraer_detalle_error(e)
+            return _build_response(
+                False,
+                summary="Error: No se pudo leer el texto de la imagen.",
+                errors=[detalle],
+            )
 
         if not result:
-            return "Error: No se detectó texto en la imagen."
+            return _build_response(
+                False,
+                summary="Error: No se detectó texto en la imagen.",
+            )
 
         logger.info(f"OCR detectó {len(result)} elementos brutos")
         logger.debug(f"Elementos OCR brutos: {result}")
@@ -554,7 +628,10 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
         tokens_ordenados, filas_detectadas = ordenar_tokens_por_posicion(result)
 
         if not tokens_ordenados or not filas_detectadas:
-            return "Error: No se pudo reconstruir el orden de lectura de la tabla."
+            return _build_response(
+                False,
+                summary="Error: No se pudo reconstruir el orden de lectura de la tabla.",
+            )
 
         logger.info(f"{len(tokens_ordenados)} tokens tras ordenar por posición (filas detectadas: {len(filas_detectadas)})")
         logger.debug(f"Filas detectadas (OCR): {filas_detectadas}")
@@ -563,7 +640,11 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
         filas = extraer_filas_lineal(filas_detectadas, prefijo_manual)
 
         if not filas:
-            return f"Error: No se pudieron extraer filas válidas. Elementos detectados: {filas_detectadas[:3] if filas_detectadas else 'ninguno'}"
+            return _build_response(
+                False,
+                summary="Error: No se pudieron extraer filas válidas.",
+                errors=[f"Elementos detectados (muestra): {filas_detectadas[:3] if filas_detectadas else 'ninguno'}"],
+            )
 
         logger.info(f"Se extrajeron {len(filas)} filas candidatas")
 
@@ -591,7 +672,10 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
             )
 
         if not registros_preparados:
-            return "Error: No se pudieron preparar registros válidos a partir del OCR."
+            return _build_response(
+                False,
+                summary="Error: No se pudieron preparar registros válidos a partir del OCR.",
+            )
 
         try:
             supabase = get_supabase_client()
@@ -616,31 +700,55 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
                     logger.debug(f"Insertado: {datos_insert}")
 
                 except Exception as e:
-                    error_msg = str(e)
-                    logger.error(f"Error insertando {row}: {error_msg}")
-
-                    if "duplicate key" in error_msg.lower():
-                        errores.append(f"ID duplicado: {row.get('id')}")
+                    logger.error(f"Error insertando {row}: {e}")
+                    error_normalizado = _formatear_error_db(row, e)
+                    if "duplicate key" in str(e).lower():
+                        errores.append(
+                            f"Clave duplicada en fila {row.get('id')}: {row.get('folio')}. Detalle: {error_normalizado}"
+                        )
                     else:
-                        errores.append(f"Error DB: {error_msg[:50]}")
-
-            mensaje = f"Procesados {len(registros_preparados)} registros, {registros_insertados} insertados exitosamente."
+                        errores.append(error_normalizado)
 
             tabla_lineas = ["Folio | Hora | Status", "----- | ---- | ------"]
             for row in registros_preparados:
                 tabla_lineas.append(f"{row['id']}{row['folio']} | {row['hora']} | {row['icono']}")
-            mensaje += "\n\n" + "\n".join(tabla_lineas)
+            tabla_texto = "\n".join(tabla_lineas)
+
+            resumen = f"Procesados {len(registros_preparados)} registros, {registros_insertados} insertados exitosamente."
 
             if errores:
-                mensaje += f"\n\n⚠️ {len(errores)} error(es): {'; '.join(errores[:2])}"
+                return _build_response(
+                    False,
+                    summary=resumen,
+                    table=tabla_texto,
+                    processed=len(registros_preparados),
+                    inserted=registros_insertados,
+                    errors=errores,
+                )
 
-            return mensaje
+            return _build_response(
+                True,
+                summary=resumen,
+                table=tabla_texto,
+                processed=len(registros_preparados),
+                inserted=registros_insertados,
+            )
 
         except Exception as e:
             error_msg = str(e)
             logger.error(f"Error Supabase: {error_msg}", exc_info=True)
-            return f"Error: No se pudo conectar a Supabase. {error_msg[:100]}"
+            detalle = _extraer_detalle_error(e)
+            return _build_response(
+                False,
+                summary="Error: No se pudo conectar a Supabase.",
+                errors=[detalle],
+            )
 
     except Exception as e:
         logger.error(f"Error general: {e}", exc_info=True)
-        return f"Error: {str(e)}"
+        detalle = _extraer_detalle_error(e)
+        return _build_response(
+            False,
+            summary="Error: Fallo inesperado procesando la tabla.",
+            errors=[detalle],
+        )
