@@ -227,6 +227,52 @@ def icono_a_estado(icono: str) -> str:
     return "indefinido"
 
 
+def generar_tabla_markdown(registros: List[Dict[str, str]]) -> str:
+    """Genera una tabla Markdown ordenada por hora a partir de los registros procesados."""
+    if not registros:
+        return "No hay datos disponibles."
+
+    filas_validas: List[Dict[str, Any]] = []
+
+    for registro in registros:
+        folio = str(registro.get("folio") or "").strip()
+        hora = str(registro.get("hora") or "").strip()
+
+        if not folio or not hora:
+            logger.debug(f"Registro omitido por datos incompletos para tabla: {registro}")
+            continue
+
+        try:
+            orden = valor_orden_hora(hora)
+        except ValueError:
+            logger.debug(f"Hora inválida omitida en tabla: '{hora}' (registro: {registro})")
+            continue
+
+        icono = registro.get("icono") or registro.get("status") or estado_a_icono(registro.get("estado"))
+        if not icono:
+            icono = "⚠️"
+
+        filas_validas.append(
+            {
+                "folio": folio,
+                "hora": hora,
+                "status": icono,
+                "orden": orden,
+            }
+        )
+
+    if not filas_validas:
+        return "No hay datos disponibles."
+
+    filas_ordenadas = sorted(filas_validas, key=lambda fila: (fila["orden"], fila["folio"]))
+
+    tabla_lineas = ["Folio | Hora | Status", "----- | ---- | ------"]
+    for fila in filas_ordenadas:
+        tabla_lineas.append(f"{fila['folio']} | {fila['hora']} | {fila['status']}")
+
+    return "\n".join(tabla_lineas)
+
+
 def es_comilla(texto: str) -> bool:
     """Detecta si un texto es una comilla o símbolo de repetición."""
     texto_limpio = texto.strip()
@@ -805,10 +851,7 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
                     else:
                         errores.append(error_normalizado)
 
-            tabla_lineas = ["Folio | Hora | Status", "----- | ---- | ------"]
-            for row in registros_preparados:
-                tabla_lineas.append(f"{row['id']}{row['folio']} | {row['hora']} | {row['icono']}")
-            tabla_texto = "\n".join(tabla_lineas)
+            tabla_texto = generar_tabla_markdown(registros_preparados)
 
             resumen = f"Procesados {len(registros_preparados)} registros, {registros_insertados} insertados exitosamente."
 
