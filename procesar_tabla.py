@@ -135,8 +135,15 @@ def limpiar_hora(hora_raw: str) -> Optional[str]:
         primera_pos = hora.find(":")
         hora = hora[: primera_pos + 1] + hora[primera_pos + 1 :].replace(":", "")
 
-    if ":" not in hora and len(hora) == 4:
-        hora = f"{hora[:2]}:{hora[2:]}"
+    if ":" not in hora:
+        if len(hora) == 4:
+            hora = f"{hora[:2]}:{hora[2:]}"
+        elif len(hora) == 3:
+            hora = f"{hora[0]}:{hora[1:]}"
+        elif len(hora) > 4 and re.fullmatch(r"\d{5,}", hora):
+            # Para cadenas largas sin separadores, tomar los últimos 4 dígitos
+            # bajo el supuesto de que los dígitos finales corresponden a la hora.
+            hora = f"{hora[-4:-2]}:{hora[-2:]}"
 
     match = re.match(r"^(\d{1,2}):(\d{2})$", hora)
     if not match:
@@ -287,6 +294,67 @@ def normalizar_estado_a_icono(estado_texto: str) -> str:
     if estado_normalizado == "completado":
         return "✅"
     return "⚠️"
+
+
+def detectar_hora_en_token(token: str) -> Optional[str]:
+    """Intenta detectar una hora válida dentro de un token OCR."""
+    if not token:
+        return None
+
+    token_limpio = normalizar_token(token)
+    if not token_limpio:
+        return None
+
+    # Primero buscar patrones explícitos con separador.
+    match_hora = re.search(r"\d{1,2}[:.]\d{2}", token_limpio)
+    if match_hora:
+        hora_cruda = match_hora.group(0).replace(".", ":")
+        hora_limpia = limpiar_hora(hora_cruda)
+        if hora_limpia:
+            logger.debug(f"  Hora detectada (con separador) desde '{token}': {hora_limpia}")
+            return hora_limpia
+
+    # Si no se encontró separador, intentar con solo dígitos (ej. 742 -> 07:42).
+    digitos = re.sub(r"\D", "", token_limpio)
+    if not digitos or len(digitos) < 3:
+        return None
+
+    fragmentos: List[str] = []
+    vistos = set()
+
+    # Priorizar fragmentos más largos para evitar perder la decena de la hora.
+    if len(digitos) in (3, 4) and digitos not in vistos:
+        fragmentos.append(digitos)
+        vistos.add(digitos)
+    if len(digitos) >= 4:
+        frag = digitos[-4:]
+        if frag not in vistos:
+            fragmentos.append(frag)
+            vistos.add(frag)
+    if len(digitos) >= 3:
+        frag = digitos[-3:]
+        if frag not in vistos:
+            fragmentos.append(frag)
+            vistos.add(frag)
+
+    for fragmento in fragmentos:
+        longitud = len(fragmento)
+        for posicion in range(1, longitud):
+            parte_horas = fragmento[:posicion]
+            parte_minutos = fragmento[posicion:]
+            if len(parte_minutos) != 2:
+                continue
+            hora_candidata = limpiar_hora(f"{parte_horas}:{parte_minutos}")
+            if hora_candidata:
+                logger.debug(
+                    "  Hora detectada (heurística) desde '%s' usando fragmento '%s': %s",
+                    token,
+                    fragmento,
+                    hora_candidata,
+                )
+                return hora_candidata
+
+    return None
 
 
 def _misma_fila(fila: Dict[str, float], elemento: Dict[str, float], tolerancia: float = 0.6) -> bool:
@@ -503,47 +571,53 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
                 numero = match_numero.group(0)
                 
                 # Si el número tiene 7+ dígitos, es un folio completo
+                longitud_folio_actual = len(folio) if folio else 0
+
                 if len(numero) >= 7:
                     # El prefijo es todo excepto los últimos 4 dígitos
                     nuevo_prefijo = numero[:-4]
-                    folio = numero
+                    if len(numero) > longitud_folio_actual:
+                        folio = numero
+                        logger.debug(f"  Folio completo detectado: {folio} (prefijo: {nuevo_prefijo})")
                     prefijo_base = nuevo_prefijo  # Actualizar prefijo para siguientes filas
-                    logger.debug(f"  Folio completo detectado: {folio} (prefijo: {nuevo_prefijo})")
                 # Si tiene 3-4 dígitos, es un subfolio (necesita prefijo)
                 elif len(numero) in [3, 4]:
                     if prefijo_base:
-                        folio = f"{prefijo_base}{numero}"
-                        logger.debug(f"  Subfolio detectado: {numero} -> folio completo: {folio}")
+                        candidato = f"{prefijo_base}{numero}"
                     else:
                         # Sin prefijo disponible, usar el número como está
-                        folio = numero
-                        logger.debug(f"  Número corto detectado sin prefijo: {numero}")
+                        candidato = numero
+                    if len(candidato) > longitud_folio_actual:
+                        folio = candidato
+                        logger.debug(f"  Subfolio detectado: {numero} -> folio completo: {folio}")
                 # Si tiene 5-6 dígitos, podría ser un folio completo o necesitar prefijo
                 elif len(numero) in [5, 6]:
                     if prefijo_base:
                         # Intentar detectar si ya incluye el prefijo
                         if numero.startswith(prefijo_base):
-                            folio = numero
-                            logger.debug(f"  Folio detectado (con prefijo): {folio}")
+                            candidato = numero
                         else:
                             # Asumir que es un subfolio más largo
-                            folio = f"{prefijo_base}{numero}"
-                            logger.debug(f"  Subfolio largo detectado: {numero} -> folio: {folio}")
+                            candidato = f"{prefijo_base}{numero}"
                     else:
                         # Sin prefijo, usar el número como está
-                        folio = numero
-                        logger.debug(f"  Número medio detectado sin prefijo: {numero}")
-                continue
+                        candidato = numero
+
+                    if len(candidato) > longitud_folio_actual:
+                        folio = candidato
+                        if candidato == numero and prefijo_base and numero.startswith(prefijo_base):
+                            logger.debug(f"  Folio detectado (con prefijo): {folio}")
+                        elif prefijo_base:
+                            logger.debug(f"  Subfolio largo detectado: {numero} -> folio: {folio}")
+                        else:
+                            logger.debug(f"  Número medio detectado sin prefijo: {numero}")
             
-            # Detectar hora (formato HH:MM o HH.MM)
-            match_hora = re.search(r"\d{1,2}[:.]\d{2}", token)
-            if match_hora:
-                hora_cruda = match_hora.group(0)
-                hora_limpia = limpiar_hora(hora_cruda.replace(".", ":"))
-                if hora_limpia:
-                    hora = hora_limpia
+            # Detectar hora con heurísticas más flexibles
+            if hora is None:
+                hora_detectada = detectar_hora_en_token(token)
+                if hora_detectada:
+                    hora = hora_detectada
                     logger.debug(f"  Hora detectada: {hora}")
-                continue
             
             # Detectar estado (símbolos o palabras)
             estado_detectado = detectar_estado_token(token)
