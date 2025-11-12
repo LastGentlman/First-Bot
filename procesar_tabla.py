@@ -79,8 +79,46 @@ def _formatear_error_db(row: Dict[str, str], exc: Exception) -> str:
 # Prefijo base se detecta automáticamente desde los folios completos en la tabla
 CHECK_SYMBOLS = {"✅", "✔", "✓", "☑", "√", "✓", "✔"}
 CROSS_SYMBOLS = {"❌", "✖", "✕", "✗", "✘", "⚠", "⚠️", "x", "X"}
-CHECK_WORDS = {"ok", "si", "sí", "hecho", "listo", "done", "v", "va", "yes"}
-CROSS_WORDS = {"no", "pendiente", "falta", "x", "fail"}
+CHECK_WORDS = {
+    "ok",
+    "si",
+    "sí",
+    "hecho",
+    "hecha",
+    "listo",
+    "lista",
+    "list",
+    "done",
+    "v",
+    "va",
+    "yes",
+    "okey",
+    "finalizado",
+    "finalizada",
+    "terminado",
+    "terminada",
+    "completo",
+    "completa",
+    "ready",
+    "check",
+}
+CROSS_WORDS = {
+    "no",
+    "pendiente",
+    "pend",
+    "pend.",
+    "pendiente.",
+    "falta",
+    "faltante",
+    "x",
+    "fail",
+    "error",
+    "cancelado",
+    "cancelada",
+    "incompleto",
+    "incompleta",
+    "no ok",
+}
 
 reader = easyocr.Reader(["es", "en"], gpu=False)
 
@@ -250,7 +288,7 @@ def generar_tabla_markdown(registros: List[Dict[str, str]]) -> str:
 
         icono = registro.get("icono") or registro.get("status") or estado_a_icono(registro.get("estado"))
         if not icono:
-            icono = "⚠️"
+            icono = "❔"
 
         filas_validas.append(
             {
@@ -309,6 +347,34 @@ def normalizar_token(texto: str) -> str:
     return texto_limpio
 
 
+def extraer_letra_y_numero(token: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Extrae una letra inicial seguida de un bloque numérico (folio) de un token.
+    Devuelve (letra, numero) o (None, None) si no se detecta el patrón.
+    """
+    if not token:
+        return None, None
+
+    token_limpio = token.strip()
+    if not token_limpio:
+        return None, None
+
+    # Patrones comunes: letra + número (con o sin separador típico)
+    patrones = [
+        r"^([A-Za-z])[-_:\s]?(\d{3,})$",
+        r"([A-Za-z])(\d{3,})",
+    ]
+
+    for patron in patrones:
+        match = re.search(patron, token_limpio)
+        if match:
+            letra = match.group(1).upper()
+            numero = match.group(2)
+            return letra, numero
+
+    return None, None
+
+
 def detectar_estado_token(token: str) -> Optional[str]:
     """Intenta inferir el estado a partir de un token OCR."""
     if not token:
@@ -319,13 +385,21 @@ def detectar_estado_token(token: str) -> Optional[str]:
         return None
 
     token_lower = token_limpio.lower()
+    token_sin_signos = re.sub(r"[^a-záéíóúüñ0-9]", "", token_lower)
+
+    if "?" in token_limpio or "¿" in token_limpio or "❔" in token_limpio:
+        return "indefinido"
 
     # Verificar símbolos de check (completado)
     if any(mark in token_limpio for mark in CHECK_SYMBOLS) or token_lower in CHECK_WORDS:
         return "completado"
-    
+    if token_sin_signos in CHECK_WORDS:
+        return "completado"
+
     # Verificar símbolos de cross/pendiente
     if any(mark in token_limpio for mark in CROSS_SYMBOLS) or token_lower in CROSS_WORDS:
+        return "pendiente"
+    if token_sin_signos in CROSS_WORDS or "no ok" in token_lower.replace("_", " "):
         return "pendiente"
 
     return None
@@ -334,12 +408,14 @@ def detectar_estado_token(token: str) -> Optional[str]:
 def normalizar_estado_a_icono(estado_texto: str) -> str:
     """Normaliza el estado de texto a un icono (✅ o ⚠️)."""
     if not estado_texto:
-        return "⚠️"
+        return "❔"
     
     estado_normalizado = estado_texto.strip().lower()
     if estado_normalizado == "completado":
         return "✅"
-    return "⚠️"
+    if estado_normalizado == "pendiente":
+        return "⚠️"
+    return "❔"
 
 
 def detectar_hora_en_token(token: str) -> Optional[str]:
@@ -560,7 +636,7 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
             # Si hay una fila en construcción, intentar completarla
             if fila_en_construccion and fila_en_construccion.get("folio") and fila_en_construccion.get("hora"):
                 letra_final = fila_en_construccion.get("letra") or letra_actual or "?"
-                estado_texto = fila_en_construccion.get("estado") or "pendiente"
+                estado_texto = fila_en_construccion.get("estado") or "indefinido"
                 estado_icono = normalizar_estado_a_icono(estado_texto)
                 
                 filas_extraidas.append({
@@ -601,21 +677,36 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
                     letra = letra_actual
                 logger.debug(f"  Comilla detectada (repetir letra: {letra})")
                 continue
+
+            numero_detectado: Optional[str] = None
+
+            # Detectar tokens con letra y número juntos (ej. F164172415)
+            letra_token, numero_token = extraer_letra_y_numero(token)
+            if letra_token:
+                letra = letra_token
+                letra_actual = letra_token
+                logger.debug(f"  Letra + folio detectados en token '{token}': letra={letra}, numero={numero_token}")
+                if numero_token:
+                    numero_detectado = numero_token
             
             # Detectar letra (una sola letra mayúscula o minúscula)
-            if len(token) == 1 and token.isalpha():
+            if (letra is None) and len(token) == 1 and token.isalpha():
                 letra = token.upper()
                 letra_actual = letra
                 logger.debug(f"  Letra detectada: {letra}")
                 continue
             
             # Detectar número (folio completo o subfolio)
-            match_numero = re.fullmatch(r"\d{3,}", token)
-            if not match_numero:
-                match_numero = re.search(r"\d{3,}", token)
-            if match_numero:
-                numero = match_numero.group(0)
-                
+            if numero_detectado is None:
+                match_numero = re.fullmatch(r"\d{3,}", token)
+                if not match_numero:
+                    match_numero = re.search(r"\d{3,}", token)
+                if match_numero:
+                    numero_detectado = match_numero.group(0)
+
+            if numero_detectado:
+                numero = numero_detectado
+
                 # Si el número tiene 7+ dígitos, es un folio completo
                 longitud_folio_actual = len(folio) if folio else 0
 
@@ -702,7 +793,7 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
             letra_final = letra or fila_en_construccion.get("letra") if fila_en_construccion else None
             letra_final = letra_final or letra_actual or "?"
             
-            estado_texto = estado or (fila_en_construccion.get("estado") if fila_en_construccion else None) or "pendiente"
+            estado_texto = estado or (fila_en_construccion.get("estado") if fila_en_construccion else None) or "indefinido"
             estado_icono = normalizar_estado_a_icono(estado_texto)
             
             fila_resultado = {
@@ -726,7 +817,7 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
     # Al final, procesar cualquier fila en construcción que quede
     if fila_en_construccion and fila_en_construccion.get("folio") and fila_en_construccion.get("hora"):
         letra_final = fila_en_construccion.get("letra") or letra_actual or "?"
-        estado_texto = fila_en_construccion.get("estado") or "pendiente"
+        estado_texto = fila_en_construccion.get("estado") or "indefinido"
         estado_icono = normalizar_estado_a_icono(estado_texto)
         
         filas_extraidas.append({
@@ -740,6 +831,97 @@ def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[
     logger.info(f"Total de filas extraídas: {len(filas_extraidas)}")
     return filas_extraidas
 
+ 
+def ejecutar_ocr(imagen: str) -> List[Any]:
+    """Ejecuta EasyOCR sobre la imagen recibida."""
+    return reader.readtext(imagen, detail=1, paragraph=False)
+
+
+def obtener_filas_desde_ocr(
+    resultados_ocr: List[Any], prefijo_manual: Optional[str] = None
+) -> Tuple[List[Dict[str, str]], List[List[str]], List[str]]:
+    """
+    Reconstruye las filas de la tabla a partir de los resultados crudos de OCR.
+    Devuelve las filas normalizadas, las filas detectadas y los tokens ordenados.
+    """
+    tokens_ordenados, filas_detectadas = ordenar_tokens_por_posicion(resultados_ocr)
+    if not tokens_ordenados or not filas_detectadas:
+        return [], filas_detectadas, tokens_ordenados
+
+    filas = extraer_filas_lineal(filas_detectadas, prefijo_manual)
+    return filas, filas_detectadas, tokens_ordenados
+
+
+def preparar_registros_para_supabase(
+    filas_en_orden: List[Dict[str, str]]
+) -> Tuple[List[Dict[str, str]], str]:
+    """
+    Toma las filas detectadas y produce registros listos para Supabase junto con
+    la representación en tabla Markdown.
+    """
+    logger.info(f"Se extrajeron {len(filas_en_orden)} filas candidatas")
+
+    registros_preparados: List[Dict[str, str]] = []
+    for idx, fila in enumerate(filas_en_orden, start=1):
+        letra = fila.get("letra") or f"L{idx}"
+        folio_completo = fila.get("folio")
+        hora_val = fila.get("hora")
+        estado_icono = fila.get("estado") or "❔"  # Estado ya viene como icono (✅/⚠️/❔)
+        estado_texto = icono_a_estado(estado_icono)
+
+        if not folio_completo or not hora_val:
+            logger.debug(f"Fila descartada (datos incompletos): {fila}")
+            continue
+
+        registros_preparados.append(
+            {
+                "id": str(letra).strip(),
+                "folio": str(folio_completo).strip(),
+                "hora": str(hora_val).strip(),
+                "estado": estado_texto,
+                "icono": estado_icono,
+            }
+        )
+
+    tabla_texto = generar_tabla_markdown(registros_preparados)
+    return registros_preparados, tabla_texto
+
+
+def insertar_registros_supabase(registros_preparados: List[Dict[str, str]]) -> Tuple[int, List[str]]:
+    """Inserta los registros en Supabase y acumula errores por fila."""
+    supabase = get_supabase_client()
+    registros_insertados = 0
+    errores: List[str] = []
+
+    for row in registros_preparados:
+        try:
+            datos_insert = {
+                "id": row["id"],
+                "folio": row["folio"],
+                "hora": row["hora"],
+                "estado": row["estado"],
+            }
+
+            if not all(datos_insert.values()):
+                errores.append(f"Datos vacíos: {datos_insert}")
+                continue
+
+            supabase.table("registros").insert(datos_insert).execute()
+            registros_insertados += 1
+            logger.debug(f"Insertado: {datos_insert}")
+
+        except Exception as e:
+            logger.error(f"Error insertando {row}: {e}")
+            error_normalizado = _formatear_error_db(row, e)
+            if "duplicate key" in str(e).lower():
+                errores.append(
+                    f"Clave duplicada en fila {row.get('id')}: {row.get('folio')}. Detalle: {error_normalizado}"
+                )
+            else:
+                errores.append(error_normalizado)
+
+    return registros_insertados, errores
+
 
 def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
     """Lee una tabla escrita a mano con EasyOCR, limpia, ordena y guarda en Supabase."""
@@ -747,7 +929,7 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
         logger.info(f"Iniciando procesamiento de tabla desde imagen: {imagen}")
 
         try:
-            result = reader.readtext(imagen, detail=1, paragraph=False)
+            resultados_ocr = ejecutar_ocr(imagen)
         except Exception as e:
             logger.error(f"Error en OCR: {e}")
             detalle = _extraer_detalle_error(e)
@@ -757,16 +939,16 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
                 errors=[detalle],
             )
 
-        if not result:
+        if not resultados_ocr:
             return _build_response(
                 False,
                 summary="Error: No se detectó texto en la imagen.",
             )
 
-        logger.info(f"OCR detectó {len(result)} elementos brutos")
-        logger.debug(f"Elementos OCR brutos: {result}")
+        logger.info(f"OCR detectó {len(resultados_ocr)} elementos brutos")
+        logger.debug(f"Elementos OCR brutos: {resultados_ocr}")
 
-        tokens_ordenados, filas_detectadas = ordenar_tokens_por_posicion(result)
+        filas, filas_detectadas, tokens_ordenados = obtener_filas_desde_ocr(resultados_ocr, prefijo_manual)
 
         if not tokens_ordenados or not filas_detectadas:
             return _build_response(
@@ -774,11 +956,10 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
                 summary="Error: No se pudo reconstruir el orden de lectura de la tabla.",
             )
 
-        logger.info(f"{len(tokens_ordenados)} tokens tras ordenar por posición (filas detectadas: {len(filas_detectadas)})")
+        logger.info(
+            f"{len(tokens_ordenados)} tokens tras ordenar por posición (filas detectadas: {len(filas_detectadas)})"
+        )
         logger.debug(f"Filas detectadas (OCR): {filas_detectadas}")
-
-        # Usar las filas agrupadas directamente en lugar de tokens lineales
-        filas = extraer_filas_lineal(filas_detectadas, prefijo_manual)
 
         if not filas:
             return _build_response(
@@ -787,101 +968,45 @@ def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
                 errors=[f"Elementos detectados (muestra): {filas_detectadas[:3] if filas_detectadas else 'ninguno'}"],
             )
 
-        logger.info(f"Se extrajeron {len(filas)} filas candidatas")
-
-        filas_en_orden = filas
-
-        registros_preparados: List[Dict[str, str]] = []
-        for idx, fila in enumerate(filas_en_orden, start=1):
-            letra = fila.get("letra") or f"L{idx}"
-            folio_completo = fila.get("folio")
-            hora_val = fila.get("hora")
-            estado_icono = fila.get("estado") or "⚠️"  # Estado ya viene como icono (✅ o ⚠️)
-            estado_texto = icono_a_estado(estado_icono)
-
-            if not folio_completo or not hora_val:
-                logger.debug(f"Fila descartada (datos incompletos): {fila}")
-                continue
-
-            registros_preparados.append(
-                {
-                    "id": str(letra).strip(),
-                    "folio": str(folio_completo).strip(),
-                    "hora": str(hora_val).strip(),
-                    "estado": estado_texto,
-                    "icono": estado_icono,  # Mantener compatibilidad
-                }
-            )
+        registros_preparados, tabla_texto = preparar_registros_para_supabase(filas)
 
         if not registros_preparados:
             return _build_response(
                 False,
                 summary="Error: No se pudieron preparar registros válidos a partir del OCR.",
+                table=tabla_texto,
             )
 
         try:
-            supabase = get_supabase_client()
-            registros_insertados = 0
-            errores = []
-
-            for row in registros_preparados:
-                try:
-                    datos_insert = {
-                        "id": row["id"],
-                        "folio": row["folio"],
-                        "hora": row["hora"],
-                        "estado": row["estado"],
-                    }
-
-                    if not all(datos_insert.values()):
-                        errores.append(f"Datos vacíos: {datos_insert}")
-                        continue
-
-                    supabase.table("registros").insert(datos_insert).execute()
-                    registros_insertados += 1
-                    logger.debug(f"Insertado: {datos_insert}")
-
-                except Exception as e:
-                    logger.error(f"Error insertando {row}: {e}")
-                    error_normalizado = _formatear_error_db(row, e)
-                    if "duplicate key" in str(e).lower():
-                        errores.append(
-                            f"Clave duplicada en fila {row.get('id')}: {row.get('folio')}. Detalle: {error_normalizado}"
-                        )
-                    else:
-                        errores.append(error_normalizado)
-
-            tabla_texto = generar_tabla_markdown(registros_preparados)
-
-            resumen = f"Procesados {len(registros_preparados)} registros, {registros_insertados} insertados exitosamente."
-
-            if errores:
-                return _build_response(
-                    False,
-                    summary=resumen,
-                    table=tabla_texto,
-                    processed=len(registros_preparados),
-                    inserted=registros_insertados,
-                    errors=errores,
-                )
-
-            return _build_response(
-                True,
-                summary=resumen,
-                table=tabla_texto,
-                processed=len(registros_preparados),
-                inserted=registros_insertados,
-            )
-
+            registros_insertados, errores = insertar_registros_supabase(registros_preparados)
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"Error Supabase: {error_msg}", exc_info=True)
+            logger.error(f"Error Supabase: {e}", exc_info=True)
             detalle = _extraer_detalle_error(e)
             return _build_response(
                 False,
                 summary="Error: No se pudo conectar a Supabase.",
                 errors=[detalle],
             )
+
+        resumen = f"Procesados {len(registros_preparados)} registros, {registros_insertados} insertados exitosamente."
+
+        if errores:
+            return _build_response(
+                False,
+                summary=resumen,
+                table=tabla_texto,
+                processed=len(registros_preparados),
+                inserted=registros_insertados,
+                errors=errores,
+            )
+
+        return _build_response(
+            True,
+            summary=resumen,
+            table=tabla_texto,
+            processed=len(registros_preparados),
+            inserted=registros_insertados,
+        )
 
     except Exception as e:
         logger.error(f"Error general: {e}", exc_info=True)
