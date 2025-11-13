@@ -418,6 +418,13 @@ def normalizar_estado_a_icono(estado_texto: str) -> str:
     return "❔"
 
 
+def generar_id_unico(folio: str, hora: str) -> str:
+    """Genera un ID único y determinista a partir del folio y la hora."""
+    folio_limpio = re.sub(r"\W+", "", folio)
+    hora_limpia = re.sub(r"\W+", "", hora)
+    return f"{folio_limpio}_{hora_limpia}"
+
+
 def detectar_hora_en_token(token: str) -> Optional[str]:
     """Intenta detectar una hora válida dentro de un token OCR."""
     if not token:
@@ -615,219 +622,99 @@ def detectar_prefijo_base(filas_texto: List[List[str]], prefijo_manual: Optional
     return None
 
 
-def extraer_filas_lineal(filas_texto: List[List[str]], prefijo_manual: Optional[str] = None) -> List[Dict[str, str]]:
+def extraer_filas_lineal(
+    filas_texto: List[List[str]], prefijo_manual: Optional[str] = None
+) -> List[Dict[str, str]]:
     """
-    Extrae filas agrupando tokens por bloques de texto secuenciales (filas OCR).
-    Reconstruye folios completos concatenando el prefijo base con subfolios de 3-4 dígitos.
-    Maneja comillas como indicadores de repetición de letra y prefijo.
-    Devuelve una lista limpia de diccionarios con: letra, folio, hora, estado.
+    Versión simplificada y robusta para extraer datos de filas OCR.
+    Procesa cada fila de forma independiente, manteniendo solo el contexto necesario.
     """
-    # Detectar prefijo base automáticamente
-    prefijo_base = detectar_prefijo_base(filas_texto, prefijo_manual)
-    
     filas_extraidas: List[Dict[str, str]] = []
-    letra_actual: Optional[str] = None
-    fila_en_construccion: Optional[Dict[str, Optional[str]]] = None
-    
-    logger.info(f"Procesando {len(filas_texto)} filas OCR detectadas")
-    
+
+    ultimo_prefijo_visto = prefijo_manual
+    ultima_letra_vista: Optional[str] = None
+
+    logger.info(f"Procesando {len(filas_texto)} filas de OCR con lógica simplificada.")
+
     for idx_fila, fila_tokens in enumerate(filas_texto):
-        if not fila_tokens:
-            # Si hay una fila en construcción, intentar completarla
-            if fila_en_construccion and fila_en_construccion.get("folio") and fila_en_construccion.get("hora"):
-                letra_final = fila_en_construccion.get("letra") or letra_actual or "?"
-                estado_texto = fila_en_construccion.get("estado") or "indefinido"
-                estado_icono = normalizar_estado_a_icono(estado_texto)
-                
-                filas_extraidas.append({
-                    "letra": letra_final,
-                    "folio": fila_en_construccion["folio"],
-                    "hora": fila_en_construccion["hora"],
-                    "estado": estado_icono,
-                })
-                logger.info(f"Fila completada desde construcción: {filas_extraidas[-1]}")
-                fila_en_construccion = None
-            continue
-        
-        # Normalizar tokens de la fila
-        tokens_limpios = [normalizar_token(t) for t in fila_tokens]
-        
+        tokens_limpios = [normalizar_token(t) for t in fila_tokens if t.strip()]
         if not tokens_limpios:
             continue
-        
-        logger.debug(f"Fila {idx_fila + 1}: tokens = {tokens_limpios}")
-        
-        # Variables para esta fila
+
+        logger.debug(f"Fila OCR {idx_fila + 1}: {tokens_limpios}")
+
         letra: Optional[str] = None
         folio: Optional[str] = None
         hora: Optional[str] = None
         estado: Optional[str] = None
-        tiene_comilla = False
-        
-        # Procesar cada token de la fila
+        usar_contexto_previo = any(es_comilla(t) for t in tokens_limpios)
+
+        if usar_contexto_previo:
+            letra = ultima_letra_vista
+            logger.debug(
+                "  Comilla detectada. Usando contexto: letra=%s, prefijo=%s",
+                letra,
+                ultimo_prefijo_visto,
+            )
+
         for token in tokens_limpios:
-            # Detectar comilla (indica repetición de letra y prefijo)
             if es_comilla(token):
-                tiene_comilla = True
-                # Si hay una fila en construcción, usar sus valores
-                if fila_en_construccion:
-                    letra = fila_en_construccion.get("letra") or letra_actual
-                    # El prefijo se mantiene del contexto
-                elif letra_actual:
-                    letra = letra_actual
-                logger.debug(f"  Comilla detectada (repetir letra: {letra})")
                 continue
 
-            numero_detectado: Optional[str] = None
-
-            # Detectar tokens con letra y número juntos (ej. F164172415)
-            letra_token, numero_token = extraer_letra_y_numero(token)
-            if letra_token:
-                letra = letra_token
-                letra_actual = letra_token
-                logger.debug(f"  Letra + folio detectados en token '{token}': letra={letra}, numero={numero_token}")
-                if numero_token:
-                    numero_detectado = numero_token
-            
-            # Detectar letra (una sola letra mayúscula o minúscula)
-            if (letra is None) and len(token) == 1 and token.isalpha():
+            if not letra and len(token) == 1 and token.isalpha():
                 letra = token.upper()
-                letra_actual = letra
-                logger.debug(f"  Letra detectada: {letra}")
+                ultima_letra_vista = letra
+                logger.debug(f"  Letra encontrada: {letra}")
                 continue
-            
-            # Detectar número (folio completo o subfolio)
-            if numero_detectado is None:
-                match_numero = re.fullmatch(r"\d{3,}", token)
-                if not match_numero:
-                    match_numero = re.search(r"\d{3,}", token)
-                if match_numero:
-                    numero_detectado = match_numero.group(0)
 
-            if numero_detectado:
-                numero = numero_detectado
-
-                # Si el número tiene 7+ dígitos, es un folio completo
-                longitud_folio_actual = len(folio) if folio else 0
-
+            numero_detectado = re.search(r"\d{3,}", token)
+            if not folio and numero_detectado:
+                numero = numero_detectado.group(0)
                 if len(numero) >= 7:
-                    # El prefijo es todo excepto los últimos 4 dígitos
-                    nuevo_prefijo = numero[:-4]
-                    if len(numero) > longitud_folio_actual:
-                        folio = numero
-                        logger.debug(f"  Folio completo detectado: {folio} (prefijo: {nuevo_prefijo})")
-                    prefijo_base = nuevo_prefijo  # Actualizar prefijo para siguientes filas
-                # Si tiene 3-4 dígitos, es un subfolio (necesita prefijo)
-                elif len(numero) in [3, 4]:
-                    if prefijo_base:
-                        candidato = f"{prefijo_base}{numero}"
-                    else:
-                        # Sin prefijo disponible, usar el número como está
-                        candidato = numero
-                    if len(candidato) > longitud_folio_actual:
-                        folio = candidato
-                        logger.debug(f"  Subfolio detectado: {numero} -> folio completo: {folio}")
-                # Si tiene 5-6 dígitos, podría ser un folio completo o necesitar prefijo
-                elif len(numero) in [5, 6]:
-                    if prefijo_base:
-                        # Intentar detectar si ya incluye el prefijo
-                        if numero.startswith(prefijo_base):
-                            candidato = numero
-                        else:
-                            # Asumir que es un subfolio más largo
-                            candidato = f"{prefijo_base}{numero}"
-                    else:
-                        # Sin prefijo, usar el número como está
-                        candidato = numero
+                    folio = numero
+                    ultimo_prefijo_visto = numero[:-4]
+                    logger.debug(
+                        "  Folio completo encontrado: %s. Nuevo prefijo base: %s",
+                        folio,
+                        ultimo_prefijo_visto,
+                    )
+                elif len(numero) in [3, 4] and ultimo_prefijo_visto:
+                    folio = f"{ultimo_prefijo_visto}{numero}"
+                    logger.debug(f"  Subfolio '{numero}' reconstruido a: {folio}")
+                else:
+                    folio = numero
+                    logger.debug(f"  Número sin prefijo claro: {folio}")
+                continue
 
-                    if len(candidato) > longitud_folio_actual:
-                        folio = candidato
-                        if candidato == numero and prefijo_base and numero.startswith(prefijo_base):
-                            logger.debug(f"  Folio detectado (con prefijo): {folio}")
-                        elif prefijo_base:
-                            logger.debug(f"  Subfolio largo detectado: {numero} -> folio: {folio}")
-                        else:
-                            logger.debug(f"  Número medio detectado sin prefijo: {numero}")
-            
-            # Detectar hora con heurísticas más flexibles
-            if hora is None:
+            if not hora:
                 hora_detectada = detectar_hora_en_token(token)
                 if hora_detectada:
                     hora = hora_detectada
-                    logger.debug(f"  Hora detectada: {hora}")
-            
-            # Detectar estado (símbolos o palabras)
-            estado_detectado = detectar_estado_token(token)
-            if estado_detectado:
-                estado = estado_detectado
-                logger.debug(f"  Estado detectado: {estado} desde token '{token}'")
-                continue
-        
-        # Si tenemos comilla pero no tenemos letra, usar la letra actual
-        if tiene_comilla and not letra:
-            letra = letra_actual
-        
-        # Si tenemos folio o hora, actualizar o crear la fila en construcción
-        if folio or hora:
-            if not fila_en_construccion:
-                fila_en_construccion = {
-                    "letra": letra or letra_actual,
-                    "folio": None,
-                    "hora": None,
-                    "estado": None,
-                }
-            
-            if folio:
-                fila_en_construccion["folio"] = folio
-            if hora:
-                fila_en_construccion["hora"] = hora
-            if letra:
-                fila_en_construccion["letra"] = letra
-            if estado:
-                fila_en_construccion["estado"] = estado
-            
-            logger.debug(f"  Fila en construcción actualizada: {fila_en_construccion}")
-        
-        # Si tenemos folio y hora completos, crear la fila final
+                    logger.debug(f"  Hora encontrada: {hora}")
+                    continue
+
+            if not estado:
+                estado_detectado = detectar_estado_token(token)
+                if estado_detectado:
+                    estado = estado_detectado
+                    logger.debug(
+                        "  Estado encontrado: %s desde token '%s'",
+                        estado,
+                        token,
+                    )
+
         if folio and hora:
-            letra_final = letra or fila_en_construccion.get("letra") if fila_en_construccion else None
-            letra_final = letra_final or letra_actual or "?"
-            
-            estado_texto = estado or (fila_en_construccion.get("estado") if fila_en_construccion else None) or "indefinido"
-            estado_icono = normalizar_estado_a_icono(estado_texto)
-            
+            estado_final = estado or "indefinido"
             fila_resultado = {
-                "letra": letra_final,
+                "letra": letra or ultima_letra_vista or "?",
                 "folio": folio,
                 "hora": hora,
-                "estado": estado_icono,
+                "estado": normalizar_estado_a_icono(estado_final),
+                "id": generar_id_unico(folio, hora),
             }
-            
             filas_extraidas.append(fila_resultado)
-            logger.info(f"Fila extraída: {fila_resultado}")
-            
-            # Limpiar la fila en construcción
-            fila_en_construccion = None
-        elif not folio and not hora:
-            # Si no hay folio ni hora en esta fila, pero hay una fila en construcción,
-            # mantenerla para la siguiente iteración
-            if fila_en_construccion:
-                logger.debug(f"Manteniendo fila en construcción: {fila_en_construccion}")
-    
-    # Al final, procesar cualquier fila en construcción que quede
-    if fila_en_construccion and fila_en_construccion.get("folio") and fila_en_construccion.get("hora"):
-        letra_final = fila_en_construccion.get("letra") or letra_actual or "?"
-        estado_texto = fila_en_construccion.get("estado") or "indefinido"
-        estado_icono = normalizar_estado_a_icono(estado_texto)
-        
-        filas_extraidas.append({
-            "letra": letra_final,
-            "folio": fila_en_construccion["folio"],
-            "hora": fila_en_construccion["hora"],
-            "estado": estado_icono,
-        })
-        logger.info(f"Fila final completada: {filas_extraidas[-1]}")
-    
+            logger.info(f"Fila extraída con éxito: {fila_resultado}")
+
     logger.info(f"Total de filas extraídas: {len(filas_extraidas)}")
     return filas_extraidas
 
@@ -862,20 +749,20 @@ def preparar_registros_para_supabase(
     logger.info(f"Se extrajeron {len(filas_en_orden)} filas candidatas")
 
     registros_preparados: List[Dict[str, str]] = []
-    for idx, fila in enumerate(filas_en_orden, start=1):
-        letra = fila.get("letra") or f"L{idx}"
+    for fila in filas_en_orden:
+        id_unico = fila.get("id")
         folio_completo = fila.get("folio")
         hora_val = fila.get("hora")
-        estado_icono = fila.get("estado") or "❔"  # Estado ya viene como icono (✅/⚠️/❔)
+        estado_icono = fila.get("estado") or "❔"
         estado_texto = icono_a_estado(estado_icono)
 
-        if not folio_completo or not hora_val:
+        if not all([id_unico, folio_completo, hora_val]):
             logger.debug(f"Fila descartada (datos incompletos): {fila}")
             continue
 
         registros_preparados.append(
             {
-                "id": str(letra).strip(),
+                "id": str(id_unico).strip(),
                 "folio": str(folio_completo).strip(),
                 "hora": str(hora_val).strip(),
                 "estado": estado_texto,
