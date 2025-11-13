@@ -486,41 +486,46 @@ def detectar_hora_en_token(token: str) -> Optional[str]:
     return None
 
 
-def _misma_fila(fila: Dict[str, float], elemento: Dict[str, float], tolerancia: float = 0.6) -> bool:
+def _misma_fila(
+    fila: Dict[str, float],
+    elemento: Dict[str, float],
+    tolerancia_y: float = 1.5,
+) -> bool:
     """
-    Determina si un token pertenece a la misma fila en función de su posición vertical.
-    Aumentada la tolerancia a 0.6 para ser más flexible con tablas escritas a mano.
+    Determina si un elemento pertenece a una fila existente con mayor tolerancia.
+    Un elemento pertenece a la fila si su centro vertical está dentro del rango
+    vertical de la fila, expandido por un factor de la altura del propio elemento.
     """
-    fila_altura = max(fila["y_max"] - fila["y_min"], 1.0)
-    elemento_altura = max(elemento["height"], 1.0)
-    margen = max(fila_altura, elemento_altura) * tolerancia
+    # El centro vertical del nuevo elemento
+    centro_y_elemento = elemento["center_y"]
 
-    por_debajo = elemento["y_min"] > fila["y_max"] + margen
-    por_encima = elemento["y_max"] < fila["y_min"] - margen
+    # El rango vertical de la fila existente
+    y_min_fila = fila["y_min"]
+    y_max_fila = fila["y_max"]
 
-    return not (por_debajo or por_encima)
+    # La altura del nuevo elemento, para usarla como umbral dinámico
+    altura_elemento = elemento["height"]
+
+    # El margen de tolerancia se basa en la altura del elemento.
+    # Un valor de 1.5 significa que el centro del elemento puede estar hasta 1.5 veces
+    # su propia altura por encima o por debajo del rango de la fila.
+    margen = altura_elemento * tolerancia_y
+
+    # Comprobar si el centro del elemento cae dentro del rango extendido de la fila
+    return (y_min_fila - margen) <= centro_y_elemento <= (y_max_fila + margen)
 
 
 def ordenar_tokens_por_posicion(resultados_ocr: List[Any]) -> Tuple[List[str], List[List[str]]]:
     """
     Utiliza las coordenadas devueltas por EasyOCR para ordenar los tokens de izquierda a derecha y de arriba hacia abajo.
-    Devuelve la lista plana de tokens en orden de lectura y, adicionalmente, las filas detectadas para depuración.
+    Usa una lógica de agrupación de filas más flexible para manejar texto manuscrito.
     """
     elementos: List[Dict[str, Any]] = []
-
     for entrada in resultados_ocr:
-        if not entrada:
+        if not (isinstance(entrada, (list, tuple)) and len(entrada) >= 2):
             continue
-
-        if len(entrada) == 3:
-            bbox, texto, confianza = entrada
-        elif len(entrada) == 2:
-            bbox, texto = entrada
-            confianza = None
-        else:
-            logger.debug(f"Formato de resultado OCR inesperado: {entrada}")
-            continue
-
+        
+        bbox, texto = entrada[:2]
         texto_crudo = (texto or "").strip()
         if not texto_crudo:
             continue
@@ -528,59 +533,54 @@ def ordenar_tokens_por_posicion(resultados_ocr: List[Any]) -> Tuple[List[str], L
         try:
             xs = [float(p[0]) for p in bbox]
             ys = [float(p[1]) for p in bbox]
-        except (TypeError, ValueError) as exc:
-            logger.debug(f"No se pudieron extraer coordenadas de {entrada}: {exc}")
+        except (TypeError, ValueError):
             continue
 
-        x_min = min(xs)
-        x_max = max(xs)
-        y_min = min(ys)
-        y_max = max(ys)
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
 
-        elementos.append(
-            {
-                "texto": texto_crudo,
-                "confianza": confianza,
-                "x_min": x_min,
-                "x_max": x_max,
-                "y_min": y_min,
-                "y_max": y_max,
-                "center_x": (x_min + x_max) / 2,
-                "center_y": (y_min + y_max) / 2,
-                "width": max(x_max - x_min, 1.0),
-                "height": max(y_max - y_min, 1.0),
-            }
-        )
+        elementos.append({
+            "texto": texto_crudo,
+            "x_min": x_min, "x_max": x_max, "y_min": y_min, "y_max": y_max,
+            "center_x": (x_min + x_max) / 2, "center_y": (y_min + y_max) / 2,
+            "height": max(y_max - y_min, 1.0),
+        })
 
     if not elementos:
         return [], []
 
-    filas: List[Dict[str, Any]] = []
+    # Ordenar todos los elementos por su posición vertical primero
+    elementos.sort(key=lambda e: e["center_y"])
 
-    for elemento in sorted(elementos, key=lambda e: e["center_y"]):
+    filas_agrupadas: List[Dict[str, Any]] = []
+    for elemento in elementos:
         asignado = False
-        for fila in filas:
+        # Buscar una fila compatible
+        for fila in filas_agrupadas:
             if _misma_fila(fila, elemento):
                 fila["elementos"].append(elemento)
+                # Actualizar el rango vertical de la fila para incluir el nuevo elemento
                 fila["y_min"] = min(fila["y_min"], elemento["y_min"])
                 fila["y_max"] = max(fila["y_max"], elemento["y_max"])
                 asignado = True
                 break
+        
         if not asignado:
-            filas.append(
-                {
-                    "elementos": [elemento],
-                    "y_min": elemento["y_min"],
-                    "y_max": elemento["y_max"],
-                }
-            )
+            # Si no se encontró fila, crear una nueva con este elemento
+            filas_agrupadas.append({
+                "elementos": [elemento],
+                "y_min": elemento["y_min"],
+                "y_max": elemento["y_max"],
+            })
 
-    filas_ordenadas = sorted(filas, key=lambda f: f["y_min"])
+    # Ordenar las filas finales por su posición vertical
+    filas_agrupadas.sort(key=lambda f: f["y_min"])
+
     filas_texto: List[List[str]] = []
     tokens_ordenados: List[str] = []
-
-    for fila in filas_ordenadas:
-        fila["elementos"].sort(key=lambda e: e["center_x"])
+    for fila in filas_agrupadas:
+        # Dentro de cada fila, ordenar los elementos por su posición horizontal
+        fila["elementos"].sort(key=lambda e: e["x_min"])
         fila_texto = [elem["texto"] for elem in fila["elementos"]]
         filas_texto.append(fila_texto)
         tokens_ordenados.extend(fila_texto)
