@@ -1,4 +1,3 @@
-import easyocr
 import re
 import logging
 import json
@@ -8,6 +7,7 @@ from typing import Optional, List, Dict, Any, Tuple
 from supabase import create_client, Client
 
 from config import SUPABASE_URL, SUPABASE_KEY
+from chandra_ocr import ChandraOcrError, leer_tabla as leer_tabla_chandra
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +119,6 @@ CROSS_WORDS = {
     "incompleta",
     "no ok",
 }
-
-reader = easyocr.Reader(["es", "en"], gpu=False)
-
 
 @lru_cache(maxsize=1)
 def get_supabase_client() -> Client:
@@ -517,7 +514,7 @@ def _misma_fila(
 
 def ordenar_tokens_por_posicion(resultados_ocr: List[Any]) -> Tuple[List[str], List[List[str]]]:
     """
-    Utiliza las coordenadas devueltas por EasyOCR para ordenar los tokens de izquierda a derecha y de arriba hacia abajo.
+    Utiliza las coordenadas devueltas por el motor de OCR para ordenar los tokens de izquierda a derecha y de arriba hacia abajo.
     Usa una lógica de agrupación de filas más flexible para manejar texto manuscrito.
     """
     elementos: List[Dict[str, Any]] = []
@@ -720,8 +717,21 @@ def extraer_filas_lineal(
 
  
 def ejecutar_ocr(imagen: str) -> List[Any]:
-    """Ejecuta EasyOCR sobre la imagen recibida."""
-    return reader.readtext(imagen, detail=1, paragraph=False)
+    """Ejecuta Chandra OCR y devuelve los resultados normalizados."""
+    try:
+        resultados = leer_tabla_chandra(imagen)
+    except ChandraOcrError:
+        logger.error("Chandra OCR devolvió un error controlado.", exc_info=True)
+        raise
+    except Exception as exc:
+        logger.error("Error inesperado ejecutando Chandra OCR.", exc_info=True)
+        raise ChandraOcrError("Fallo inesperado ejecutando Chandra OCR.") from exc
+
+    if not resultados:
+        raise ChandraOcrError("Chandra OCR no devolvió texto.")
+
+    logger.info("Chandra OCR generó %d elementos.", len(resultados))
+    return resultados
 
 
 def obtener_filas_desde_ocr(
@@ -811,7 +821,7 @@ def insertar_registros_supabase(registros_preparados: List[Dict[str, str]]) -> T
 
 
 def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
-    """Lee una tabla escrita a mano con EasyOCR, limpia, ordena y guarda en Supabase."""
+    """Lee una tabla escrita a mano con Chandra OCR, limpia, ordena y guarda en Supabase."""
     try:
         logger.info(f"Iniciando procesamiento de tabla desde imagen: {imagen}")
 
