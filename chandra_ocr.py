@@ -280,7 +280,7 @@ def _collect_lines(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return resultados
 
 
-def _to_easyocr_results(items: Iterable[Dict[str, Any]]) -> List[List[Any]]:
+def _to_parser_results(items: Iterable[Dict[str, Any]]) -> List[List[Any]]:
     resultados: List[List[Any]] = []
     for item in items:
         texto = item.get("text")
@@ -294,7 +294,7 @@ def _to_easyocr_results(items: Iterable[Dict[str, Any]]) -> List[List[Any]]:
 
 def leer_tabla(imagen: ReadableImage) -> List[List[Any]]:
     """
-    Ejecuta Chandra OCR y devuelve resultados compatibles con EasyOCR.
+    Ejecuta Chandra OCR y devuelve resultados compatibles con el parser de tablas.
     Cada elemento tiene formato [bbox, texto, confianza].
     """
     config = _get_config()
@@ -313,12 +313,12 @@ def leer_tabla(imagen: ReadableImage) -> List[List[Any]]:
     celdas = _collect_cells_from_tables(payload)
     if celdas:
         logger.info("Chandra OCR devolvió %d celdas con layout de tabla.", len(celdas))
-        return _to_easyocr_results(celdas)
+        return _to_parser_results(celdas)
 
     lineas = _collect_lines(payload)
     if lineas:
         logger.info("Chandra OCR devolvió %d líneas sin layout de tabla.", len(lineas))
-        return _to_easyocr_results(lineas)
+        return _to_parser_results(lineas)
 
     detalle = payload.keys()
     raise ChandraOcrResponseError(

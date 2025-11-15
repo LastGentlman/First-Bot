@@ -1,8 +1,6 @@
-import easyocr
 import re
 import logging
 import json
-import os
 from functools import lru_cache
 from typing import Optional, List, Dict, Any, Tuple
 
@@ -121,9 +119,6 @@ CROSS_WORDS = {
     "incompleta",
     "no ok",
 }
-
-reader = easyocr.Reader(["es", "en"], gpu=False)
-
 
 @lru_cache(maxsize=1)
 def get_supabase_client() -> Client:
@@ -519,7 +514,7 @@ def _misma_fila(
 
 def ordenar_tokens_por_posicion(resultados_ocr: List[Any]) -> Tuple[List[str], List[List[str]]]:
     """
-    Utiliza las coordenadas devueltas por EasyOCR para ordenar los tokens de izquierda a derecha y de arriba hacia abajo.
+    Utiliza las coordenadas devueltas por el motor de OCR para ordenar los tokens de izquierda a derecha y de arriba hacia abajo.
     Usa una lógica de agrupación de filas más flexible para manejar texto manuscrito.
     """
     elementos: List[Dict[str, Any]] = []
@@ -721,32 +716,22 @@ def extraer_filas_lineal(
     return filas_extraidas
 
  
-def _debe_usar_chandra() -> bool:
-    return os.getenv("OCR_ENGINE", "easyocr").strip().lower() == "chandra"
-
-
 def ejecutar_ocr(imagen: str) -> List[Any]:
-    """
-    Ejecuta el motor de OCR configurado. Actualmente soporta EasyOCR y Chandra.
-    Si Chandra falla o no devuelve resultados, se hace fallback automático a EasyOCR.
-    """
-    if _debe_usar_chandra():
-        try:
-            resultados = leer_tabla_chandra(imagen)
-            if resultados:
-                logger.info("OCR (Chandra) generó %d elementos.", len(resultados))
-                return resultados
-            logger.warning("Chandra OCR no devolvió tokens. Usando EasyOCR como fallback.")
-        except ChandraOcrError as exc:
-            logger.warning("Chandra OCR falló: %s. Fallback a EasyOCR.", exc, exc_info=True)
-        except Exception as exc:
-            logger.error(
-                "Error inesperado ejecutando Chandra OCR. Fallback a EasyOCR.",
-                exc_info=True,
-            )
+    """Ejecuta Chandra OCR y devuelve los resultados normalizados."""
+    try:
+        resultados = leer_tabla_chandra(imagen)
+    except ChandraOcrError:
+        logger.error("Chandra OCR devolvió un error controlado.", exc_info=True)
+        raise
+    except Exception as exc:
+        logger.error("Error inesperado ejecutando Chandra OCR.", exc_info=True)
+        raise ChandraOcrError("Fallo inesperado ejecutando Chandra OCR.") from exc
 
-    logger.info("Ejecutando EasyOCR.")
-    return reader.readtext(imagen, detail=1, paragraph=False)
+    if not resultados:
+        raise ChandraOcrError("Chandra OCR no devolvió texto.")
+
+    logger.info("Chandra OCR generó %d elementos.", len(resultados))
+    return resultados
 
 
 def obtener_filas_desde_ocr(
@@ -836,7 +821,7 @@ def insertar_registros_supabase(registros_preparados: List[Dict[str, str]]) -> T
 
 
 def procesar_tabla(imagen: str, prefijo_manual: Optional[str] = None):
-    """Lee una tabla escrita a mano con EasyOCR, limpia, ordena y guarda en Supabase."""
+    """Lee una tabla escrita a mano con Chandra OCR, limpia, ordena y guarda en Supabase."""
     try:
         logger.info(f"Iniciando procesamiento de tabla desde imagen: {imagen}")
 

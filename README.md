@@ -17,8 +17,7 @@ pip install -r requirements.txt
 1. Define las credenciales mediante variables de entorno (p. ej. en `.env` o `fly secrets`):
    - `BOT_TOKEN`: token del bot de Telegram.
    - `SUPABASE_URL` y `SUPABASE_KEY`: credenciales de Supabase.
-   - `OCR_ENGINE` (opcional): selecciona el motor de OCR. Valores soportados `easyocr` (por defecto) o `chandra`.
-   - `CHANDRA_API_KEY`: requerido si `OCR_ENGINE=chandra`.
+   - `CHANDRA_API_KEY`: API key para el servicio de Chandra OCR (obligatoria).
    - `CHANDRA_API_URL` (opcional): endpoint del servicio Chandra OCR. Por defecto `https://api.chandra-ocr.com/v1/table`.
    - `CHANDRA_MODEL` (opcional): modelo a usar en Chandra. Por defecto `chandra-table-latest`.
    - `CHANDRA_TIMEOUT` (opcional): timeout HTTP en segundos, por defecto `30`.
@@ -33,11 +32,10 @@ python main.py
 Acciones disponibles desde Telegram:
 - `/start`: mensaje de bienvenida y guía de uso.
 - `/tabla`: activa el modo de procesamiento para la siguiente imagen de tabla.
-- Envío de imagen: el bot descarga la foto, procesa los datos con el motor OCR configurado y responde con el resultado formateado.
+- Envío de imagen: el bot descarga la foto, procesa los datos con Chandra OCR y responde con el resultado formateado.
 
-## Motores de OCR soportados
-- **EasyOCR**: motor por defecto, sin configuración adicional.
-- **Chandra OCR**: define `OCR_ENGINE=chandra` más las variables `CHANDRA_API_KEY` y opcionalmente `CHANDRA_API_URL`, `CHANDRA_MODEL`, `CHANDRA_TIMEOUT`. El módulo `chandra_ocr.py` traduce la respuesta de Chandra al formato que consume el parser. Si la petición falla o no devuelve contenido útil, `procesar_tabla` hace fallback automático a EasyOCR para mantener el flujo original.
+## OCR
+El pipeline utiliza exclusivamente **Chandra OCR**. El módulo `chandra_ocr.py` envía la imagen al endpoint configurado, traduce el layout que devuelve Chandra al formato que consume el parser y, si la respuesta carece de coordenadas, genera bounding boxes sintéticos para conservar el orden de lectura. Los errores se reportan claramente para que el bot informe al usuario sin bloquear el resto de la arquitectura.
 
 ## Estructura principal
 - `main.py`: arranque del bot y handlers de comandos/mensajes.
@@ -46,7 +44,7 @@ Acciones disponibles desde Telegram:
 - `chandra_ocr.py`: integración con Chandra OCR y normalización del layout de tabla.
 
 ## Próximos pasos sugeridos
-- Ajustar la agrupación de celdas utilizando las coordenadas devueltas por EasyOCR.
+- Ajustar la agrupación de celdas utilizando las coordenadas devueltas por el motor OCR.
 - Añadir validaciones y manejo de errores en las inserciones de Supabase.
 - Crear pruebas automatizadas para la función `procesar_tabla` con distintos ejemplos de tablas manuscritas.
 
