@@ -17,6 +17,11 @@ pip install -r requirements.txt
 1. Define las credenciales mediante variables de entorno (p. ej. en `.env` o `fly secrets`):
    - `BOT_TOKEN`: token del bot de Telegram.
    - `SUPABASE_URL` y `SUPABASE_KEY`: credenciales de Supabase.
+   - `OCR_ENGINE` (opcional): selecciona el motor de OCR. Valores soportados `easyocr` (por defecto) o `chandra`.
+   - `CHANDRA_API_KEY`: requerido si `OCR_ENGINE=chandra`.
+   - `CHANDRA_API_URL` (opcional): endpoint del servicio Chandra OCR. Por defecto `https://api.chandra-ocr.com/v1/table`.
+   - `CHANDRA_MODEL` (opcional): modelo a usar en Chandra. Por defecto `chandra-table-latest`.
+   - `CHANDRA_TIMEOUT` (opcional): timeout HTTP en segundos, por defecto `30`.
 2. (Opcional) Carga las variables desde `.env` usando `python-dotenv` (el archivo `config.py` ya lo hace automáticamente).
 3. Verifica que en Supabase exista la tabla `registros` con las columnas `id`, `folio`, `hora` y `estado`.
 
@@ -28,12 +33,17 @@ python main.py
 Acciones disponibles desde Telegram:
 - `/start`: mensaje de bienvenida y guía de uso.
 - `/tabla`: activa el modo de procesamiento para la siguiente imagen de tabla.
-- Envío de imagen: el bot descarga la foto, procesa los datos con EasyOCR y responde con el resultado formateado.
+- Envío de imagen: el bot descarga la foto, procesa los datos con el motor OCR configurado y responde con el resultado formateado.
+
+## Motores de OCR soportados
+- **EasyOCR**: motor por defecto, sin configuración adicional.
+- **Chandra OCR**: define `OCR_ENGINE=chandra` más las variables `CHANDRA_API_KEY` y opcionalmente `CHANDRA_API_URL`, `CHANDRA_MODEL`, `CHANDRA_TIMEOUT`. El módulo `chandra_ocr.py` traduce la respuesta de Chandra al formato que consume el parser. Si la petición falla o no devuelve contenido útil, `procesar_tabla` hace fallback automático a EasyOCR para mantener el flujo original.
 
 ## Estructura principal
 - `main.py`: arranque del bot y handlers de comandos/mensajes.
 - `config.py`: credenciales y configuración sensible.
 - `procesar_tabla.py`: lógica de OCR, limpieza de datos y envío a Supabase.
+- `chandra_ocr.py`: integración con Chandra OCR y normalización del layout de tabla.
 
 ## Próximos pasos sugeridos
 - Ajustar la agrupación de celdas utilizando las coordenadas devueltas por EasyOCR.

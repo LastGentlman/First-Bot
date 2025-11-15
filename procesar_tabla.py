@@ -2,12 +2,14 @@ import easyocr
 import re
 import logging
 import json
+import os
 from functools import lru_cache
 from typing import Optional, List, Dict, Any, Tuple
 
 from supabase import create_client, Client
 
 from config import SUPABASE_URL, SUPABASE_KEY
+from chandra_ocr import ChandraOcrError, leer_tabla as leer_tabla_chandra
 
 logger = logging.getLogger(__name__)
 
@@ -719,8 +721,31 @@ def extraer_filas_lineal(
     return filas_extraidas
 
  
+def _debe_usar_chandra() -> bool:
+    return os.getenv("OCR_ENGINE", "easyocr").strip().lower() == "chandra"
+
+
 def ejecutar_ocr(imagen: str) -> List[Any]:
-    """Ejecuta EasyOCR sobre la imagen recibida."""
+    """
+    Ejecuta el motor de OCR configurado. Actualmente soporta EasyOCR y Chandra.
+    Si Chandra falla o no devuelve resultados, se hace fallback automático a EasyOCR.
+    """
+    if _debe_usar_chandra():
+        try:
+            resultados = leer_tabla_chandra(imagen)
+            if resultados:
+                logger.info("OCR (Chandra) generó %d elementos.", len(resultados))
+                return resultados
+            logger.warning("Chandra OCR no devolvió tokens. Usando EasyOCR como fallback.")
+        except ChandraOcrError as exc:
+            logger.warning("Chandra OCR falló: %s. Fallback a EasyOCR.", exc, exc_info=True)
+        except Exception as exc:
+            logger.error(
+                "Error inesperado ejecutando Chandra OCR. Fallback a EasyOCR.",
+                exc_info=True,
+            )
+
+    logger.info("Ejecutando EasyOCR.")
     return reader.readtext(imagen, detail=1, paragraph=False)
 
 
