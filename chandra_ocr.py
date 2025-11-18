@@ -1,6 +1,7 @@
 import logging
 import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from urllib.parse import urlparse
 
 import httpx
 
@@ -21,6 +22,45 @@ class ChandraOcrResponseError(ChandraOcrError):
     """Se lanza cuando la API responde con datos inválidos."""
 
 
+def _read_bool_env(var_name: str) -> Optional[bool]:
+    value = os.getenv(var_name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("Valor inválido para %s=%s. Ignorando.", var_name, value)
+    return None
+
+
+def _is_local_api(api_url: str) -> bool:
+    try:
+        parsed = urlparse(api_url)
+    except ValueError:
+        return False
+
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+
+    if host in {"localhost", "127.0.0.1", "0.0.0.0", "chandra_api"}:
+        return True
+
+    if host.endswith(".local"):
+        return True
+
+    return False
+
+
+def _should_require_api_key(api_url: str) -> bool:
+    override = _read_bool_env("CHANDRA_REQUIRE_API_KEY")
+    if override is not None:
+        return override
+    return not _is_local_api(api_url)
+
+
 def _get_config() -> Dict[str, Any]:
     timeout_env = os.getenv("CHANDRA_TIMEOUT", "").strip()
     try:
@@ -29,17 +69,19 @@ def _get_config() -> Dict[str, Any]:
         logger.warning("Valor inválido para CHANDRA_TIMEOUT=%s. Usando 30s.", timeout_env)
         timeout = 30.0
 
-    config = {
-        "api_url": os.getenv("CHANDRA_API_URL", "https://api.chandra-ocr.com/v1/table"),
-        "api_key": os.getenv("CHANDRA_API_KEY", "").strip(),
+    api_url = os.getenv("CHANDRA_API_URL", "https://api.chandra-ocr.com/v1/table")
+    api_key = os.getenv("CHANDRA_API_KEY", "").strip()
+
+    require_api_key = _should_require_api_key(api_url)
+    if require_api_key and not api_key:
+        raise ChandraOcrConfigurationError("CHANDRA_API_KEY no está definido.")
+
+    return {
+        "api_url": api_url,
+        "api_key": api_key,
         "model": os.getenv("CHANDRA_MODEL", "chandra-table-latest"),
         "timeout": timeout,
     }
-
-    if not config["api_key"]:
-        raise ChandraOcrConfigurationError("CHANDRA_API_KEY no está definido.")
-
-    return config
 
 
 def _load_image_bytes(imagen: ReadableImage) -> bytes:
@@ -62,9 +104,10 @@ def _load_image_bytes(imagen: ReadableImage) -> bytes:
 
 
 def _build_headers(api_key: str) -> Dict[str, str]:
-    return {
-        "Authorization": f"Bearer {api_key}",
-    }
+    headers: Dict[str, str] = {}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 def _post_ocr_request(
