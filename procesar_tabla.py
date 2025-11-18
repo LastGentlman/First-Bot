@@ -34,18 +34,40 @@ def _extraer_detalle_error(exc: Exception) -> str:
     """
     Intenta obtener un mensaje detallado desde diferentes atributos de la excepción.
     Incluye objetos JSON serializados completos cuando están disponibles.
+    También recorre la cadena de causas (__cause__/__context__) para conservar el detalle original.
     """
+
+    def _iter_error_chain(error: BaseException):
+        visto: set[int] = set()
+        cursor: Optional[BaseException] = error
+        while cursor and id(cursor) not in visto:
+            visto.add(id(cursor))
+            yield cursor
+            cursor = getattr(cursor, "__cause__", None) or getattr(cursor, "__context__", None)
+
     candidatos: List[Any] = []
+    cadena_errores = list(_iter_error_chain(exc))
 
-    if hasattr(exc, "args") and exc.args:
-        candidatos.extend(list(exc.args))
+    for error in reversed(cadena_errores):
+        if hasattr(error, "args") and error.args:
+            for arg in error.args:
+                if arg not in candidatos:
+                    candidatos.append(arg)
 
-    for attr in ("message", "msg", "detail", "details", "response"):
-        valor = getattr(exc, attr, None)
-        if valor and valor not in candidatos:
-            candidatos.append(valor)
+        for attr in ("message", "msg", "detail", "details", "response"):
+            valor = getattr(error, attr, None)
+            if valor and valor not in candidatos:
+                candidatos.append(valor)
 
-    candidatos.append(str(exc))
+        notas = getattr(error, "__notes__", None)
+        if notas:
+            for nota in notas:
+                if nota not in candidatos:
+                    candidatos.append(nota)
+
+        texto_error = str(error)
+        if texto_error and texto_error not in candidatos:
+            candidatos.append(texto_error)
 
     # Priorizar estructuras tipo dict
     for candidato in candidatos:
@@ -725,7 +747,7 @@ def ejecutar_ocr(imagen: str) -> List[Any]:
         raise
     except Exception as exc:
         logger.error("Error inesperado ejecutando Chandra OCR.", exc_info=True)
-        raise ChandraOcrError("Fallo inesperado ejecutando Chandra OCR.") from exc
+        raise ChandraOcrError(f"Fallo inesperado ejecutando Chandra OCR: {exc}") from exc
 
     if not resultados:
         raise ChandraOcrError("Chandra OCR no devolvió texto.")
